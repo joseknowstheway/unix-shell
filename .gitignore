@@ -1,0 +1,9 @@
+# Build output
+mysh
+mysh-debug
+*.o
+*.dSYM/
+
+# Editor / OS cruft
+.DS_Store
+.vscode/

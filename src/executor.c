@@ -255,6 +255,7 @@ static void format_pipeline_label(const pipeline_t *pipeline, char *buf,
 int wait_foreground_group(shell_state_t *state, pid_t pgid, const char *label)
 {
     int last_status = 0;
+    int interrupted = 0; /* job killed by Ctrl+C / Ctrl+\ — needs a fresh line */
 
     for (;;) {
         int   status;
@@ -282,7 +283,18 @@ int wait_foreground_group(shell_state_t *state, pid_t pgid, const char *label)
 
         /* A member terminated. Keep the most recent status as the result; for a
          * single command that's exact, for a pipeline it's the last to finish. */
+        if (WIFSIGNALED(status) &&
+            (WTERMSIG(status) == SIGINT || WTERMSIG(status) == SIGQUIT)) {
+            interrupted = 1;
+        }
         last_status = status_to_code(status);
+    }
+
+    /* The terminal echoed "^C"/"^\" with no newline, so move to a fresh line
+     * before the next prompt — exactly what bash does. Interactive only, so
+     * scripted (piped) output is byte-for-byte unchanged. */
+    if (interrupted && state->interactive) {
+        printf("\n");
     }
 
     /* Fully finished: if this was a tracked (resumed) job, drop it. */

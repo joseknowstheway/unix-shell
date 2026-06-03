@@ -842,7 +842,14 @@ never consumes *stop* events — only the foreground wait does, via WUNTRACED.
 Without `SA_NOCLDSTOP` the reaper and the foreground wait would fight over who
 sees the stop.
 
-**5. Verification approach.** Job control can't be exercised by piping commands
+**5. The `^Cmysh>` cosmetic bug (fixed).** After Ctrl+C the terminal echoes `^C`
+with no newline, so the next prompt printed right after it: `^Cmysh>`. Fix:
+`wait_foreground_group` notes when a foreground job was killed by SIGINT/SIGQUIT
+and prints a newline before returning, so the prompt starts on a fresh line —
+matching bash. Gated on `state->interactive`, so scripted (piped) output stays
+byte-for-byte identical (the `^C` echo only happens on a real terminal anyway).
+
+**6. Verification approach.** Job control can't be exercised by piping commands
 in (no tty), so it was tested two ways: piped input for non-regression (pipes,
 redirection, builtins, background still work), and a **Python PTY harness** that
 sends real Ctrl+C (`\x03`) and Ctrl+Z (`\x1a`) and asserts the shell survives,

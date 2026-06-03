@@ -19,8 +19,10 @@
 #include "parser.h"
 #include "executor.h"
 #include "builtins.h"
+#include "signals.h"
 #include "shell.h"
 
+#include <signal.h> /* sigset_t */
 #include <stdio.h>  /* printf, fflush, getline */
 #include <stdlib.h> /* free */
 
@@ -31,6 +33,12 @@ int main(void)
     /* All shell-process state in one place (zero-initialized: empty history,
      * status 0, not exiting). */
     shell_state_t state = {0};
+    jobs_init(&state.jobs);
+
+    /* Install the SIGCHLD reaper so finished background jobs are collected (no
+     * zombies) and marked done. Done after jobs_init so the handler's table
+     * pointer is valid. */
+    install_signal_handlers(&state);
 
     /* getline() manages this buffer for us: pass a NULL pointer and 0 size the
      * first time and it allocates; on later calls it reuses or grows the same
@@ -39,6 +47,15 @@ int main(void)
     size_t line_cap = 0;
 
     for (;;) {
+        /* Report any background jobs that finished since the last prompt, and
+         * free their slots. SIGCHLD is blocked for a consistent snapshot (the
+         * reaper writes the same table). This is why "[1] Done sleep 5" appears
+         * at the prompt rather than interrupting other output. */
+        sigset_t prev;
+        block_sigchld(&prev);
+        jobs_notify_completed(&state.jobs);
+        unblock_sigchld(&prev);
+
         /* 1. Prompt. fflush guarantees it appears before we block on input —
          * stdout is line-buffered to a terminal but not when piped, and we want
          * the prompt visible either way. */

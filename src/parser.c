@@ -45,6 +45,16 @@ int parse_command(char *segment, command_t *cmd)
         /* A redirection operator consumes the NEXT token as its filename and
          * adds neither to args — the program never sees "<", ">", or the
          * filename; it just finds its stdin/stdout already pointed at the file. */
+        /* A lone "&" marks the command (and thus its pipeline) as background.
+         * Only meaningful at the very end; we simply record it and don't add it
+         * to args. Like the redirection operators, it must be its own token
+         * ("sleep 5 &", not "sleep 5&"). */
+        if (strcmp(token, "&") == 0) {
+            cmd->background = 1;
+            token = strtok_r(NULL, TOKEN_DELIMITERS, &saveptr);
+            continue;
+        }
+
         int is_input  = (strcmp(token, "<") == 0);
         int is_output = (strcmp(token, ">") == 0);
         int is_append = (strcmp(token, ">>") == 0);
@@ -101,6 +111,13 @@ int parse_pipeline(char *line, pipeline_t *pipeline)
             pipeline->num_commands++;
         }
         segment = strtok_r(NULL, PIPE_DELIMITER, &saveptr);
+    }
+
+    /* The "&" lives on the last command (it comes after the last '|'); promote
+     * it to a pipeline-wide flag so the executor backgrounds the whole thing. */
+    if (pipeline->num_commands > 0) {
+        pipeline->background =
+            pipeline->commands[pipeline->num_commands - 1].background;
     }
 
     return pipeline->num_commands;

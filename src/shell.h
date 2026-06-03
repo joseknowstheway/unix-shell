@@ -12,11 +12,13 @@
  */
 
 #include "history.h"
+#include "jobs.h"
 
 typedef struct {
-    history_t history;     /* recently entered command lines */
-    int       last_status; /* exit status of the last command (future "$?") */
-    int       should_exit; /* set by the `exit` built-in to end the REPL */
+    history_t    history;     /* recently entered command lines */
+    jobs_table_t jobs;        /* background jobs (Stage 5) */
+    int          last_status; /* exit status of the last command (future "$?") */
+    int          should_exit; /* set by the `exit` built-in to end the REPL */
 } shell_state_t;
 
 #endif /* SHELL_H */

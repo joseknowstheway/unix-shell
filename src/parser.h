@@ -53,6 +53,7 @@ typedef struct {
 typedef struct {
     command_t commands[MAX_COMMANDS];
     int       num_commands;
+    int       background; /* 1 if the line ended in "&" (Stage 5) */
 } pipeline_t;
 
 /*

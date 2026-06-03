@@ -2,42 +2,32 @@
 #define EXECUTOR_H
 
 /*
- * executor.h — runs parsed commands (Stages 1–2).
+ * executor.h — runs parsed commands (Stages 1–5).
  *
- * This is where the shell touches the kernel. Stage 1 implemented the core
- * process pattern (fork / execvp / waitpid). Stage 2 adds pipelines: chaining
- * several commands so each one's stdout feeds the next one's stdin, wired
- * together with pipe() and dup2().
+ * This is where the shell touches the kernel: the core process pattern (fork /
+ * execvp / waitpid), pipelines (pipe + dup2), redirection (open + dup2), and
+ * background execution (fork without waiting, tracked as a job).
  */
 
 #include "parser.h"
 #include "shell.h"
 
 /*
- * execute_command
- *   cmd   : a parsed command with at least one argument (cmd->argc >= 1).
- *   state : shell state, passed through so a built-in run inside a forked child
- *           (a pipeline stage) can reach the history etc.
- *
- * Forks a child, replaces it with cmd->args[0], and blocks until it exits.
- * Used directly for the single-command case (a pipeline of length 1).
- *
- * Returns the child's exit status (0–255), 128 + signal number if it was killed
- * by a signal, or -1 if the shell failed to fork.
- */
-int execute_command(const command_t *cmd, shell_state_t *state);
-
-/*
  * execute_pipeline
- *   pipeline : one or more parsed commands (pipeline->num_commands >= 1).
- *   state    : shell state (see execute_command).
+ *   pipeline : one or more parsed commands (pipeline->num_commands >= 1). If
+ *              pipeline->background is set, runs detached and records a job.
+ *   state    : shell state — threaded through so a built-in in a pipeline stage
+ *              can reach history/jobs, and so background jobs can be recorded.
  *
- * Runs every command concurrently, connecting command i's stdout to command
- * i+1's stdin through a kernel pipe, then waits for them all.
+ * Foreground: runs every stage concurrently, connecting stage i's stdout to
+ * stage i+1's stdin via a kernel pipe, waits for them all, and returns the LAST
+ * stage's exit status (bash's "$?" convention). A lone command is just a
+ * pipeline of length 1.
  *
- * Returns the exit status of the LAST command in the pipeline — the same
- * convention bash uses for "$?" (so "false | true" is success, "true | false"
- * is failure). Returns -1 on a setup failure (pipe/fork).
+ * Background: forks the stages, records a job, prints "[id] pid", and returns 0
+ * immediately without waiting.
+ *
+ * Returns the exit status (foreground) or 0 (background); -1 on a setup failure.
  */
 int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state);
 

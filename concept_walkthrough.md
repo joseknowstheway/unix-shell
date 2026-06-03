@@ -17,7 +17,7 @@
 - [Stage 2 — Pipes](#stage-2--pipes)
 - [Stage 3 — I/O Redirection](#stage-3--io-redirection)
 - [Stage 4 — Built-in Commands](#stage-4--built-in-commands)
-- [Stage 5 — Background Processes](#stage-5--background-processes) *(upcoming)*
+- [Stage 5 — Background Processes](#stage-5--background-processes)
 - [Stage 6 — Signal Handling & Job Control](#stage-6--signal-handling--job-control) *(upcoming)*
 - [Stage 7 — Polish & Presentation](#stage-7--polish--presentation) *(upcoming)*
 
@@ -609,5 +609,158 @@ mysh> exit 7                 ← shell exits with status 7
 
 ---
 
-*Stages 5–7 are documented here as they're built — one section each, same shape:
+## Stage 5 — Background Processes
+
+**Files:** `jobs.c`, `jobs.h`, `signals.c`, `signals.h` (+ `parser`, `executor`,
+`builtins`, `shell.h`, `main.c` wiring)
+**Goal:** run a command with a trailing `&` in the background — return to the
+prompt immediately — and manage it with `jobs`, `fg`, and `kill`, reaping it when
+it finishes so it never becomes a zombie.
+
+### Key concepts
+
+**1. Background = fork without wait + track the job.**
+A foreground command is fork → waitpid. A background command is fork → *don't*
+waitpid → record the child in a jobs table → return to the prompt. The single
+fork engine `spawn_pipeline` is shared; the only difference is what happens
+after: foreground waits, background records.
+
+**2. Zombies, and why reaping is mandatory.**
+When a child exits, the kernel keeps a small "zombie" entry holding its exit
+status until the parent collects it with `wait`/`waitpid`. A foreground command
+is collected right away. A background child finishes whenever it likes, so
+something must collect it later — otherwise zombies accumulate. That "something"
+is the SIGCHLD handler.
+
+**3. SIGCHLD + `waitpid(-1, WNOHANG)` in a loop.**
+When any child terminates the kernel sends the parent SIGCHLD. The handler reaps
+with `waitpid(-1, &status, WNOHANG)`: `-1` = any child, `WNOHANG` = don't block
+if none are ready. It loops because **signals don't queue** — if three children
+die at nearly the same time, the parent may get a single SIGCHLD standing for all
+three, so one delivery must drain every finished child.
+
+**4. Async-signal-safety: the handler does almost nothing.**
+A signal handler can interrupt the program anywhere, even mid-`printf`/`malloc`,
+so it may only call **async-signal-safe** functions. `waitpid` is safe; `printf`
+and `malloc` are not. So the handler only reaps and flips a job's state to DONE
+(`jobs_mark_done` touches the array and nothing else). It prints nothing. The
+"[1] Done" notice is emitted later, from normal code at the next prompt
+(`jobs_notify_completed`). It also saves/restores `errno`, because it may have
+interrupted code that was about to read it.
+
+**5. The two races, and `sigprocmask`.**
+The handler and the main code share the jobs table, which is a classic
+concurrency hazard. Two specific races, both fixed by **blocking SIGCHLD**
+(`sigprocmask`) around the critical section:
+- *Reaper steals a foreground child.* If SIGCHLD fired while a foreground
+  command was running, the handler's `waitpid(-1)` would reap that foreground
+  child, and the shell's own `waitpid(pid)` would then fail with ECHILD and lose
+  the status. Fix: block SIGCHLD around the foreground spawn+wait.
+- *Mark-done before add.* A very short background job could finish (and the
+  handler run) *before* `jobs_add` recorded it, so `mark_done` would find nothing
+  and the job would be stuck "Running" forever. Fix: block SIGCHLD around the
+  background spawn+add.
+
+**6. `SA_RESTART` so the prompt survives a finishing job.**
+The shell spends most of its life blocked in the read under `getline`. If a
+background job finishes then, SIGCHLD interrupts that read. Without care the read
+returns -1/EINTR — which our code reads as EOF and would exit the shell! The
+handler is installed with `sigaction` and **`SA_RESTART`**, which auto-restarts
+the interrupted read instead of failing it. (`SA_NOCLDSTOP` is also set so we
+aren't notified about merely *stopped* children — that's Stage 6's concern.)
+
+**7. Children must start with a clean signal mask.**
+Because the shell forks with SIGCHLD blocked (inside the critical sections), the
+child inherits that blocked mask — and `exec` preserves the mask. A new program
+shouldn't start with SIGCHLD blocked, so `exec_child` resets the mask to empty
+before exec.
+
+**8. Why the handler can't be passed the jobs table.**
+A signal handler's signature is fixed — it receives only the signal number. So
+the table is reached through a file-static pointer set at install time. This is
+the one place the shell uses a global, and it's forced by the signal API (noted
+honestly rather than pretending the no-globals rule held everywhere).
+
+### Bugs & mistakes (and fixes)
+
+This stage built clean and ran leak-/zombie-free on the first try — but only
+because the concurrency hazards were designed around deliberately. They're the
+whole point of the stage, so here they are as "traps and the decisions that avoid
+them":
+
+**1. The ECHILD race (reaper vs. foreground wait).** Described above. The symptom
+if unguarded: intermittent "waitpid: No such child" and lost/garbled exit
+statuses, depending on timing — the nastiest kind of bug. The fix is to block
+SIGCHLD around every foreground wait. *Tested:* foreground commands still report
+correct status while a background job runs.
+
+**2. The lost-job race (mark-done before add).** Block SIGCHLD around
+spawn+`jobs_add`. *Tested:* `sleep 0.001 &` style fast jobs still show up and get
+their Done notice.
+
+**3. EINTR exiting the shell.** Before `SA_RESTART`, a background job finishing
+while the user sat at the prompt would interrupt `getline`, return EOF, and quit
+the shell unexpectedly. `SA_RESTART` fixes it. *Tested:* `sleep 1 &` then waiting
+does not drop the shell.
+
+**4. Inherited blocked mask in children.** Fixed by resetting the mask in
+`exec_child`. Without it, every program you run would start with SIGCHLD blocked —
+invisible until you ran something that itself relied on SIGCHLD.
+
+**5. Known limitations, accepted for now.**
+- A killed job is reported as `Done`, not `Terminated` (we don't yet decode
+  *how* it died for the notice).
+- A background *pipeline* tracks only its last stage as the job's pid; all stages
+  are still reaped (no zombies), but the recorded status reflects the last stage.
+- `&` must be its own token (`sleep 5 &`, not `sleep 5&`) — same tokenizer
+  simplification as the redirection operators.
+Stage 6 (process groups / real job control) and the Stage 7 polish revisit these.
+
+### Reading the output
+
+```
+mysh> sleep 1 &
+[1] 26672                     ← job id and pid; prompt returns immediately
+mysh> jobs
+[1]  Running  sleep 1
+mysh> sleep 2                 ← foreground; the background job finishes meanwhile
+mysh> [1]  Done     sleep 1   ← reported at the next prompt, not mid-output
+mysh> sleep 30 &
+[1] 26788
+mysh> kill %1                 ← SIGTERM to the job
+mysh> sleep 2 &
+[1] 26848
+mysh> fg %1                   ← wait for it in the foreground
+sleep 2
+```
+
+### Likely interview questions
+
+- *What's a zombie process and how do you avoid one?* → a terminated child whose
+  exit status hasn't been collected; the parent must `wait`/`waitpid` it. We reap
+  background children in a SIGCHLD handler.
+- *Why loop `waitpid(-1, WNOHANG)` in the SIGCHLD handler?* → signals don't
+  queue, so one SIGCHLD may represent several dead children; the loop drains them
+  all, and WNOHANG keeps it from blocking when none remain.
+- *What can you safely call in a signal handler, and why?* → only
+  async-signal-safe functions; the handler can interrupt the program mid-`malloc`
+  or mid-`printf`, so calling those risks deadlock/corruption. Ours only reaps and
+  sets a flag/state, and saves/restores errno.
+- *How do you prevent the SIGCHLD handler from interfering with a foreground
+  `waitpid`?* → block SIGCHLD with `sigprocmask` around the foreground wait so the
+  reaper can't collect that child first (which would cause ECHILD).
+- *What race exists between launching a background job and the reaper?* → the job
+  could finish before it's recorded; block SIGCHLD around the fork+add so
+  mark-done can't run before the entry exists.
+- *Why `SA_RESTART`?* → so a delivered SIGCHLD restarts the interrupted `read`
+  under `getline` instead of failing it with EINTR (which we'd misread as EOF).
+- *Why print the "Done" notice at the prompt instead of in the handler?* → stdio
+  isn't async-signal-safe; we defer all output to normal code.
+- *How does `fg` work here without process groups?* → it's a blocking `waitpid`
+  on the job's pid (with SIGCHLD blocked so the reaper doesn't beat us to it);
+  Stage 6 adds terminal control and stopped-job resumption.
+
+---
+
+*Stages 6–7 are documented here as they're built — one section each, same shape:
 what was built, key concepts, bugs & fixes, and interview Q&A.*

@@ -1,5 +1,5 @@
 /*
- * executor.c — the fork/exec/wait core plus pipelines (Stages 1–2).
+ * executor.c — fork/exec/wait, pipelines, redirection, background (Stages 1–5).
  *
  * Stage 1 recap — why three system calls instead of one:
  *
@@ -10,24 +10,26 @@
  *   waitpid() blocks the parent until a child terminates and reports how it died.
  *
  * Stage 2 — pipelines. A pipe is a one-way kernel buffer with two ends:
- * pipe(fds) gives fds[0] (read) and fds[1] (write). Anything written to fds[1]
- * comes out of fds[0]. To make "ls | grep" work we run both commands at once,
- * point ls's stdout at a pipe's write end and grep's stdin at the same pipe's
- * read end (via dup2), and let data flow.
+ * pipe(fds) gives fds[0] (read) and fds[1] (write). We run every stage at once,
+ * wire each stage's stdout to the next stage's stdin via dup2, and obey the
+ * golden rule of pipes: close every pipe fd you don't use, in BOTH child and
+ * parent, or the reader never sees EOF and the pipeline hangs.
  *
- * The make-or-break rule of pipes is FILE-DESCRIPTOR HYGIENE: every process that
- * inherits a copy of a pipe end must close the ends it doesn't use. A pipe's
- * read end only reports EOF once EVERY copy of the write end is closed. If the
- * shell (or any child) leaves a write end open, the reader blocks forever and
- * the pipeline hangs. So we close aggressively, in both children and parent.
+ * Stage 5 — background. spawn_pipeline forks (and wires) every stage but does
+ * NOT wait; the foreground path then waits for them, while the background path
+ * records a job and returns to the prompt immediately. Foreground waiting blocks
+ * SIGCHLD so the async reaper (signals.c) can't snatch our children out from
+ * under our waitpid.
  */
 
 #include "executor.h"
 #include "builtins.h"
+#include "signals.h"
 
 #include <errno.h>     /* errno */
 #include <fcntl.h>     /* open, O_* flags */
-#include <stdio.h>     /* fprintf */
+#include <signal.h>    /* sigprocmask, sigemptyset (reset child mask) */
+#include <stdio.h>     /* fprintf, printf, snprintf */
 #include <stdlib.h>    /* exit, EXIT_FAILURE */
 #include <string.h>    /* strerror */
 #include <sys/wait.h>  /* waitpid, WIFEXITED, WEXITSTATUS, WIFSIGNALED */
@@ -75,13 +77,20 @@ static void apply_redirection(const command_t *cmd)
 /*
  * exec_child — replace the current (child) process with cmd's program.
  *
- * Shared by the single-command and pipeline paths. Called only in a child, only
- * after any file descriptors have already been rewired. Never returns: on
- * success the image is replaced; on failure it reports and exits, so a failed
+ * Called only in a child, after any pipe fds have been rewired. Never returns:
+ * on success the image is replaced; on failure it reports and exits, so a failed
  * child can never fall back into the shell's REPL and become a second shell.
  */
 static void exec_child(const command_t *cmd, shell_state_t *state)
 {
+    /* The shell forks children with SIGCHLD blocked (foreground/background
+     * critical sections). Reset the mask so the new program starts with a clean
+     * signal state, as it would under any normal shell. exec preserves the
+     * signal mask, so we must clear it here ourselves. */
+    sigset_t empty;
+    sigemptyset(&empty);
+    sigprocmask(SIG_SETMASK, &empty, NULL);
+
     /* Redirect files last so they win over any pipe wiring already in place. */
     apply_redirection(cmd);
 
@@ -118,42 +127,21 @@ static int status_to_code(int status)
     return 0;
 }
 
-int execute_command(const command_t *cmd, shell_state_t *state)
-{
-    pid_t pid = fork();
-
-    if (pid < 0) {
-        perror("mysh: fork");
-        return -1;
-    }
-
-    if (pid == 0) {
-        /* ── CHILD ── no fds to rewire for a lone command; just exec. */
-        exec_child(cmd, state);
-    }
-
-    /* ── PARENT ── wait for exactly this child. */
-    int status;
-    if (waitpid(pid, &status, 0) < 0) {
-        perror("mysh: waitpid");
-        return -1;
-    }
-    return status_to_code(status);
-}
-
-int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
+/*
+ * spawn_pipeline — fork and wire every stage; fill pids[]; do NOT wait.
+ *
+ * This is the shared engine for both foreground and background execution: the
+ * only difference between them is what the caller does afterward (wait, or
+ * record a job). Returns the number of stages forked, or -1 on a setup error.
+ */
+static int spawn_pipeline(const pipeline_t *pipeline, shell_state_t *state,
+                          pid_t pids[])
 {
     int n = pipeline->num_commands;
 
-    /* A pipeline of one is just a normal command — reuse the simple path. */
-    if (n == 1) {
-        return execute_command(&pipeline->commands[0], state);
-    }
-
     /* prev_read holds the read end of the PREVIOUS command's output pipe, which
      * becomes the CURRENT command's stdin. -1 means "no upstream" (first cmd). */
-    int   prev_read = -1;
-    pid_t pids[MAX_COMMANDS];
+    int prev_read = -1;
 
     for (int i = 0; i < n; i++) {
         int is_last = (i == n - 1);
@@ -204,9 +192,81 @@ int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
         }
     }
 
-    /* Reap every child. We keep the LAST command's status as the pipeline's
-     * result (bash's convention for "$?"); the rest are reaped so they don't
-     * linger as zombies. */
+    return n;
+}
+
+/*
+ * format_pipeline_label — render a pipeline back into a readable string for the
+ * jobs listing, e.g. "sleep 5" or "ls -la | grep .c". snprintf keeps it within
+ * the buffer; an over-long pipeline is simply truncated.
+ */
+static void format_pipeline_label(const pipeline_t *pipeline, char *buf,
+                                  size_t size)
+{
+    size_t used = 0;
+    buf[0] = '\0';
+
+    for (int c = 0; c < pipeline->num_commands && used < size; c++) {
+        if (c > 0) {
+            int n = snprintf(buf + used, size - used, " | ");
+            if (n < 0) return;
+            used += (size_t)n;
+        }
+        const command_t *cmd = &pipeline->commands[c];
+        for (int a = 0; a < cmd->argc && used < size; a++) {
+            int n = snprintf(buf + used, size - used, "%s%s",
+                             (a > 0) ? " " : "", cmd->args[a]);
+            if (n < 0) return;
+            used += (size_t)n;
+        }
+    }
+}
+
+int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
+{
+    int   n = pipeline->num_commands;
+    pid_t pids[MAX_COMMANDS];
+
+    if (pipeline->background) {
+        /* Block SIGCHLD across spawn+record so the reaper can't fire and try to
+         * mark this job done before it has been entered into the table. */
+        sigset_t prev;
+        block_sigchld(&prev);
+
+        if (spawn_pipeline(pipeline, state, pids) < 0) {
+            unblock_sigchld(&prev);
+            return -1;
+        }
+
+        char label[JOB_CMD_LEN];
+        format_pipeline_label(pipeline, label, sizeof label);
+        /* Track the LAST stage as the job's representative pid. Other stages are
+         * still reaped by the SIGCHLD handler (no zombies); they just don't map
+         * to a job entry. */
+        int job_id = jobs_add(&state->jobs, pids[n - 1], label);
+
+        unblock_sigchld(&prev);
+
+        if (job_id < 0) {
+            fprintf(stderr, "mysh: too many background jobs\n");
+        } else {
+            printf("[%d] %d\n", job_id, (int)pids[n - 1]);
+        }
+        return 0;
+    }
+
+    /* Foreground: block SIGCHLD so the async reaper can't reap our children
+     * before our own waitpid does (which would make waitpid fail with ECHILD and
+     * lose the exit status). The forked children reset their own mask before
+     * exec, so they're unaffected. */
+    sigset_t prev;
+    block_sigchld(&prev);
+
+    if (spawn_pipeline(pipeline, state, pids) < 0) {
+        unblock_sigchld(&prev);
+        return -1;
+    }
+
     int status = 0;
     for (int i = 0; i < n; i++) {
         int s;
@@ -214,5 +274,7 @@ int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
             status = status_to_code(s);
         }
     }
+
+    unblock_sigchld(&prev);
     return status;
 }

@@ -8,12 +8,15 @@
  */
 
 #include "builtins.h"
+#include "signals.h"
 
-#include <errno.h>  /* errno */
-#include <stdio.h>  /* fprintf, printf */
-#include <stdlib.h> /* getenv, setenv, atoi */
-#include <string.h> /* strcmp, strchr */
-#include <unistd.h> /* chdir */
+#include <errno.h>     /* errno */
+#include <signal.h>    /* kill, SIGTERM, sigset_t */
+#include <stdio.h>     /* fprintf, printf */
+#include <stdlib.h>    /* getenv, setenv, atoi */
+#include <string.h>    /* strcmp, strchr */
+#include <sys/wait.h>  /* waitpid */
+#include <unistd.h>    /* chdir */
 
 /*
  * builtin_cd — change the working directory.
@@ -79,6 +82,110 @@ static int builtin_export(char *const *args)
     return 0;
 }
 
+/* builtin_jobs — list background jobs. SIGCHLD is blocked for a consistent
+ * snapshot, since the reaper could otherwise mutate the table mid-print. */
+static int builtin_jobs(shell_state_t *state)
+{
+    sigset_t prev;
+    block_sigchld(&prev);
+    jobs_print(&state->jobs);
+    unblock_sigchld(&prev);
+    return 0;
+}
+
+/* Parse a "%N" job spec (or a bare "N") into a job id; -1 if malformed. */
+static int parse_job_id(const char *arg)
+{
+    if (arg == NULL) {
+        return -1;
+    }
+    const char *digits = (arg[0] == '%') ? arg + 1 : arg;
+    if (*digits == '\0') {
+        return -1;
+    }
+    return atoi(digits);
+}
+
+/*
+ * builtin_fg — bring a background job to the foreground and wait for it.
+ * Without process groups (Stage 6) this is simply a blocking waitpid on the
+ * job's pid. SIGCHLD is blocked across the lookup and wait so the reaper can't
+ * collect the child first (which would make our waitpid fail).
+ */
+static int builtin_fg(const command_t *cmd, shell_state_t *state)
+{
+    int id = parse_job_id(cmd->args[1]);
+    if (id < 0) {
+        fprintf(stderr, "mysh: fg: usage: fg %%jobid\n");
+        return 1;
+    }
+
+    sigset_t prev;
+    block_sigchld(&prev);
+
+    job_t *job = jobs_find_by_id(&state->jobs, id);
+    if (job == NULL) {
+        unblock_sigchld(&prev);
+        fprintf(stderr, "mysh: fg: %s: no such job\n", cmd->args[1]);
+        return 1;
+    }
+
+    pid_t pid = job->pid;
+    printf("%s\n", job->command); /* bash echoes the resumed command */
+
+    int code = 0;
+    if (job->state == JOB_RUNNING) {
+        int status;
+        if (waitpid(pid, &status, 0) > 0) {
+            if (WIFEXITED(status)) {
+                code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                code = 128 + WTERMSIG(status);
+            }
+        }
+    }
+    jobs_remove_by_id(&state->jobs, id);
+
+    unblock_sigchld(&prev);
+    return code;
+}
+
+/*
+ * builtin_kill — send SIGTERM to a job ("%N") or a raw pid. The dying child
+ * raises SIGCHLD, so the reaper marks the job done and the next prompt reports
+ * it — we don't reap here.
+ */
+static int builtin_kill(const command_t *cmd, shell_state_t *state)
+{
+    if (cmd->args[1] == NULL) {
+        fprintf(stderr, "mysh: kill: usage: kill %%jobid | pid\n");
+        return 1;
+    }
+
+    pid_t pid;
+    if (cmd->args[1][0] == '%') {
+        int id = parse_job_id(cmd->args[1]);
+        sigset_t prev;
+        block_sigchld(&prev);
+        job_t *job = jobs_find_by_id(&state->jobs, id);
+        if (job == NULL) {
+            unblock_sigchld(&prev);
+            fprintf(stderr, "mysh: kill: %s: no such job\n", cmd->args[1]);
+            return 1;
+        }
+        pid = job->pid;
+        unblock_sigchld(&prev);
+    } else {
+        pid = (pid_t)atoi(cmd->args[1]);
+    }
+
+    if (kill(pid, SIGTERM) != 0) {
+        perror("mysh: kill");
+        return 1;
+    }
+    return 0;
+}
+
 /* builtin_help — list the available built-ins. */
 static int builtin_help(void)
 {
@@ -87,6 +194,9 @@ static int builtin_help(void)
     printf("  exit [code]       exit the shell (default: last command's status)\n");
     printf("  export NAME=VALUE set an environment variable for child processes\n");
     printf("  history           list previously entered commands\n");
+    printf("  jobs              list background jobs\n");
+    printf("  fg %%jobid         wait for a background job in the foreground\n");
+    printf("  kill %%jobid|pid   send SIGTERM to a job or pid\n");
     printf("  help              show this message\n");
     printf("\n");
     printf("Everything else is run as an external program via fork/exec.\n");
@@ -99,6 +209,9 @@ int is_builtin(const char *name)
            strcmp(name, "exit") == 0 ||
            strcmp(name, "export") == 0 ||
            strcmp(name, "history") == 0 ||
+           strcmp(name, "jobs") == 0 ||
+           strcmp(name, "fg") == 0 ||
+           strcmp(name, "kill") == 0 ||
            strcmp(name, "help") == 0;
 }
 
@@ -118,6 +231,15 @@ int run_builtin(const command_t *cmd, shell_state_t *state)
     if (strcmp(name, "history") == 0) {
         history_print(&state->history);
         return 0;
+    }
+    if (strcmp(name, "jobs") == 0) {
+        return builtin_jobs(state);
+    }
+    if (strcmp(name, "fg") == 0) {
+        return builtin_fg(cmd, state);
+    }
+    if (strcmp(name, "kill") == 0) {
+        return builtin_kill(cmd, state);
     }
     if (strcmp(name, "help") == 0) {
         return builtin_help();

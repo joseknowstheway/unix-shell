@@ -13,8 +13,9 @@
  * status. A shell that never reaps would slowly leak zombies.
  *
  * The table is a fixed array of slots. Each background command gets one slot and
- * a user-facing id ([1], [2], ...). The STOPPED state is unused until Stage 6
- * (Ctrl+Z / job control); Stage 5 uses RUNNING and DONE.
+ * a user-facing id ([1], [2], ...). As of Stage 6 the `pid` field holds the
+ * job's process GROUP id (pgid), so signals and terminal control act on the
+ * whole pipeline at once; STOPPED is now a live state (Ctrl+Z).
  */
 
 #include <sys/types.h> /* pid_t */
@@ -29,7 +30,7 @@ typedef enum {
 } job_state_t;
 
 typedef struct {
-    pid_t       pid;     /* the job's representative pid (last pipeline stage) */
+    pid_t       pid;     /* the job's process group id (pgid) */
     int         job_id;  /* user-facing number shown as [N] */
     job_state_t state;
     int         status;  /* raw waitpid status once reaped (for future "$?") */
@@ -46,12 +47,14 @@ typedef struct {
 void jobs_init(jobs_table_t *table);
 
 /*
- * jobs_add — record a new background job.
- * Returns the assigned job id, or -1 if the table is full. The caller should
- * have SIGCHLD blocked across the fork+add so the reaper can't try to mark this
- * job done before it exists in the table.
+ * jobs_add — record a new job in the given state (RUNNING for "&", STOPPED for a
+ * Ctrl+Z'd foreground job). `pid` is the job's process group id. Returns the
+ * assigned job id, or -1 if the table is full. The caller should have SIGCHLD
+ * blocked across the fork+add so the reaper can't mark this job done before it
+ * exists in the table.
  */
-int jobs_add(jobs_table_t *table, pid_t pid, const char *command);
+int jobs_add(jobs_table_t *table, pid_t pid, const char *command,
+             job_state_t state);
 
 /*
  * jobs_mark_done — flag the job owning `pid` as finished and stash its status.
@@ -64,8 +67,14 @@ void jobs_mark_done(jobs_table_t *table, pid_t pid, int status);
 /* Look up a job by its user-facing id; NULL if not found. */
 job_t *jobs_find_by_id(jobs_table_t *table, int job_id);
 
+/* Look up a job by its process group id; NULL if not found. */
+job_t *jobs_find_by_pid(jobs_table_t *table, pid_t pid);
+
 /* Free a slot by id (no-op if absent). */
 void jobs_remove_by_id(jobs_table_t *table, int job_id);
+
+/* Free a slot by process group id (no-op if absent). */
+void jobs_remove_by_pid(jobs_table_t *table, pid_t pid);
 
 /* Print every live job: "[id]  <state>  command" (the `jobs` built-in). */
 void jobs_print(const jobs_table_t *table);

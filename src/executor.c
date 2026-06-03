@@ -75,6 +75,24 @@ static void apply_redirection(const command_t *cmd)
 }
 
 /*
+ * reset_child_signals — restore default dispositions before exec.
+ *
+ * The shell sets the interactive signals to SIG_IGN, and exec PRESERVES ignored
+ * dispositions (it only resets *caught* signals to default). So a child would
+ * inherit "ignore Ctrl+C" unless we explicitly restore SIG_DFL here — which is
+ * exactly what lets Ctrl+C/Ctrl+Z act on the foreground program.
+ */
+static void reset_child_signals(void)
+{
+    signal(SIGINT,  SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGTSTP, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
+    signal(SIGTTOU, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+}
+
+/*
  * exec_child — replace the current (child) process with cmd's program.
  *
  * Called only in a child, after any pipe fds have been rewired. Never returns:
@@ -90,6 +108,9 @@ static void exec_child(const command_t *cmd, shell_state_t *state)
     sigset_t empty;
     sigemptyset(&empty);
     sigprocmask(SIG_SETMASK, &empty, NULL);
+
+    /* Restore default signal handlers (see reset_child_signals). */
+    reset_child_signals();
 
     /* Redirect files last so they win over any pipe wiring already in place. */
     apply_redirection(cmd);
@@ -161,7 +182,15 @@ static int spawn_pipeline(const pipeline_t *pipeline, shell_state_t *state,
 
         if (pid == 0) {
             /* ── CHILD i ──
-             * Wire stdin to the upstream pipe (if any), stdout to our own output
+             * Join the job's process group so Ctrl+C/Ctrl+Z reach the whole
+             * pipeline as a unit. The first stage CREATES the group (its pid
+             * becomes the pgid); later stages join it. Both child and parent
+             * call setpgid to close the fork/exec race (whichever wins, the
+             * value is the same); errors are ignored. */
+            pid_t pgid = (i == 0) ? 0 : pids[0];
+            setpgid(0, pgid);
+
+            /* Wire stdin to the upstream pipe (if any), stdout to our own output
              * pipe (if we're not last), then close every raw pipe fd we still
              * hold: once dup2 has copied an fd onto STDIN/STDOUT, the original
              * number is redundant, and leaving it open would keep a pipe end
@@ -179,10 +208,11 @@ static int spawn_pipeline(const pipeline_t *pipeline, shell_state_t *state,
         }
 
         /* ── PARENT ──
-         * The child now owns whatever copies it needs. The parent must drop its
-         * own copies immediately, or those open fds would hold pipe ends open
-         * and prevent the readers downstream from ever seeing EOF. */
+         * Mirror the child's setpgid (race-free group assignment), then drop our
+         * own copies of the pipe fds immediately, or those open fds would hold
+         * pipe ends open and prevent downstream readers from ever seeing EOF. */
         pids[i] = pid;
+        setpgid(pid, (i == 0) ? pid : pids[0]); /* ignore EACCES if child exec'd */
         if (prev_read != -1) {
             close(prev_read);                  /* fully handed off to child i */
         }
@@ -222,10 +252,50 @@ static void format_pipeline_label(const pipeline_t *pipeline, char *buf,
     }
 }
 
+int wait_foreground_group(shell_state_t *state, pid_t pgid, const char *label)
+{
+    int last_status = 0;
+
+    for (;;) {
+        int   status;
+        /* Wait for ANY member of the foreground group. WUNTRACED also reports a
+         * child that STOPPED (Ctrl+Z), which a plain wait would miss. */
+        pid_t pid = waitpid(-pgid, &status, WUNTRACED);
+        if (pid < 0) {
+            break; /* ECHILD: no members remain — the job is finished */
+        }
+
+        if (WIFSTOPPED(status)) {
+            /* Ctrl+Z stops the entire foreground group at once. Record (or, for
+             * a resumed job, re-mark) it as stopped so fg/bg can revive it. */
+            job_t *job = jobs_find_by_pid(&state->jobs, pgid);
+            int job_id;
+            if (job != NULL) {
+                job->state = JOB_STOPPED;
+                job_id = job->job_id;
+            } else {
+                job_id = jobs_add(&state->jobs, pgid, label, JOB_STOPPED);
+            }
+            printf("\n[%d]  Stopped  %s\n", job_id, label);
+            return 128 + WSTOPSIG(status);
+        }
+
+        /* A member terminated. Keep the most recent status as the result; for a
+         * single command that's exact, for a pipeline it's the last to finish. */
+        last_status = status_to_code(status);
+    }
+
+    /* Fully finished: if this was a tracked (resumed) job, drop it. */
+    jobs_remove_by_pid(&state->jobs, pgid);
+    return last_status;
+}
+
 int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
 {
-    int   n = pipeline->num_commands;
     pid_t pids[MAX_COMMANDS];
+
+    char label[JOB_CMD_LEN];
+    format_pipeline_label(pipeline, label, sizeof label);
 
     if (pipeline->background) {
         /* Block SIGCHLD across spawn+record so the reaper can't fire and try to
@@ -238,25 +308,22 @@ int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
             return -1;
         }
 
-        char label[JOB_CMD_LEN];
-        format_pipeline_label(pipeline, label, sizeof label);
-        /* Track the LAST stage as the job's representative pid. Other stages are
-         * still reaped by the SIGCHLD handler (no zombies); they just don't map
-         * to a job entry. */
-        int job_id = jobs_add(&state->jobs, pids[n - 1], label);
+        /* The job's pid is its process group id (the first stage). */
+        pid_t pgid = pids[0];
+        int job_id = jobs_add(&state->jobs, pgid, label, JOB_RUNNING);
 
         unblock_sigchld(&prev);
 
         if (job_id < 0) {
             fprintf(stderr, "mysh: too many background jobs\n");
         } else {
-            printf("[%d] %d\n", job_id, (int)pids[n - 1]);
+            printf("[%d] %d\n", job_id, (int)pgid);
         }
         return 0;
     }
 
     /* Foreground: block SIGCHLD so the async reaper can't reap our children
-     * before our own waitpid does (which would make waitpid fail with ECHILD and
+     * before our own wait does (which would make waitpid fail with ECHILD and
      * lose the exit status). The forked children reset their own mask before
      * exec, so they're unaffected. */
     sigset_t prev;
@@ -267,12 +334,19 @@ int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
         return -1;
     }
 
-    int status = 0;
-    for (int i = 0; i < n; i++) {
-        int s;
-        if (waitpid(pids[i], &s, 0) > 0 && i == n - 1) {
-            status = status_to_code(s);
-        }
+    pid_t pgid = pids[0];
+
+    /* Hand the terminal to the job so it (not the shell) owns Ctrl+C/Ctrl+Z and
+     * may read stdin; reclaim it once the job finishes or stops. tcsetpgrp from
+     * the now-background shell would raise SIGTTOU, but the shell ignores it. */
+    if (state->interactive) {
+        tcsetpgrp(state->shell_terminal, pgid);
+    }
+
+    int status = wait_foreground_group(state, pgid, label);
+
+    if (state->interactive) {
+        tcsetpgrp(state->shell_terminal, state->shell_pgid);
     }
 
     unblock_sigchld(&prev);

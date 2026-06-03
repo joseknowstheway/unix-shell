@@ -9,8 +9,23 @@
  * background execution (fork without waiting, tracked as a job).
  */
 
+#include <sys/types.h> /* pid_t */
+
 #include "parser.h"
 #include "shell.h"
+
+/*
+ * wait_foreground_group
+ *   state : shell state (jobs table, for recording a Ctrl+Z'd job).
+ *   pgid  : process group id of the foreground job to wait on.
+ *   label : human-readable command, used if the job stops and must be recorded.
+ *
+ * Waits (with WUNTRACED) for the whole foreground process group to finish or
+ * stop. On a stop, records/updates a STOPPED job and returns 128+stopsig. On
+ * completion, removes any tracked job and returns the last status. Shared by the
+ * initial foreground path and the `fg` built-in.
+ */
+int wait_foreground_group(shell_state_t *state, pid_t pgid, const char *label);
 
 /*
  * execute_pipeline

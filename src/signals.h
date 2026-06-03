@@ -2,12 +2,13 @@
 #define SIGNALS_H
 
 /*
- * signals.h — signal handling (Stage 5: SIGCHLD reaping).
+ * signals.h — signal handling & job control setup (Stages 5–6).
  *
- * When a background child terminates, the kernel sends the shell SIGCHLD. We
- * install a handler that reaps every finished child (so none linger as zombies)
- * and marks the matching job done. Stage 6 will extend this file with SIGINT /
- * SIGTSTP / terminal control for full job control.
+ * Stage 5: a SIGCHLD handler reaps finished children (no zombies) and marks jobs
+ * done. Stage 6: the shell also IGNORES the interactive signals (SIGINT,
+ * SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU) so Ctrl+C / Ctrl+Z reach the foreground
+ * job's process group rather than the shell, and it takes ownership of the
+ * controlling terminal.
  *
  * Concurrency: the handler and the main code both touch the jobs table, so the
  * main code blocks SIGCHLD around its table accesses. These helpers wrap the
@@ -19,10 +20,12 @@
 #include "shell.h"
 
 /*
- * install_signal_handlers — install the SIGCHLD reaper.
- * Stashes a pointer to state->jobs for the handler to use, and registers the
- * handler with SA_RESTART (so a background child finishing doesn't make the
- * blocking read under getline fail with EINTR).
+ * install_signal_handlers — set up all signal handling and job control.
+ * Detects whether stdin is a terminal (state->interactive), puts the shell in
+ * its own process group and takes the terminal (when interactive), sets the
+ * interactive signals to SIG_IGN, and installs the SIGCHLD reaper with
+ * SA_RESTART (so a finishing background child doesn't make the read under
+ * getline fail with EINTR). Stashes &state->jobs for the handler.
  */
 void install_signal_handlers(shell_state_t *state);
 

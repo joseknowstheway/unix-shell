@@ -19,14 +19,15 @@ void jobs_init(jobs_table_t *table)
     table->next_id = 1;
 }
 
-int jobs_add(jobs_table_t *table, pid_t pid, const char *command)
+int jobs_add(jobs_table_t *table, pid_t pid, const char *command,
+             job_state_t state)
 {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (!table->jobs[i].in_use) {
             job_t *job = &table->jobs[i];
             job->pid    = pid;
             job->job_id = table->next_id++;
-            job->state  = JOB_RUNNING;
+            job->state  = state;
             job->status = 0;
             job->in_use = 1;
             snprintf(job->command, JOB_CMD_LEN, "%s", command);
@@ -60,9 +61,27 @@ job_t *jobs_find_by_id(jobs_table_t *table, int job_id)
     return NULL;
 }
 
+job_t *jobs_find_by_pid(jobs_table_t *table, pid_t pid)
+{
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (table->jobs[i].in_use && table->jobs[i].pid == pid) {
+            return &table->jobs[i];
+        }
+    }
+    return NULL;
+}
+
 void jobs_remove_by_id(jobs_table_t *table, int job_id)
 {
     job_t *job = jobs_find_by_id(table, job_id);
+    if (job != NULL) {
+        job->in_use = 0;
+    }
+}
+
+void jobs_remove_by_pid(jobs_table_t *table, pid_t pid)
+{
+    job_t *job = jobs_find_by_pid(table, pid);
     if (job != NULL) {
         job->in_use = 0;
     }

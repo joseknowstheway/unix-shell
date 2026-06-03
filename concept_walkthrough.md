@@ -18,7 +18,7 @@
 - [Stage 3 — I/O Redirection](#stage-3--io-redirection)
 - [Stage 4 — Built-in Commands](#stage-4--built-in-commands)
 - [Stage 5 — Background Processes](#stage-5--background-processes)
-- [Stage 6 — Signal Handling & Job Control](#stage-6--signal-handling--job-control) *(upcoming)*
+- [Stage 6 — Signal Handling & Job Control](#stage-6--signal-handling--job-control)
 - [Stage 7 — Polish & Presentation](#stage-7--polish--presentation) *(upcoming)*
 
 ---
@@ -762,5 +762,139 @@ sleep 2
 
 ---
 
-*Stages 6–7 are documented here as they're built — one section each, same shape:
-what was built, key concepts, bugs & fixes, and interview Q&A.*
+## Stage 6 — Signal Handling & Job Control
+
+**Files:** `signals.c`, `signals.h`, `executor.c`, `builtins.c`, `jobs.c/.h`,
+`shell.h` (+ `main.c`)
+**Goal:** make **Ctrl+C** and **Ctrl+Z** act on the foreground job, not the
+shell, and let `fg`/`bg` resume a stopped job. This is real Unix job control:
+process groups + terminal ownership.
+
+### Key concepts
+
+**1. The problem: terminal signals go to a whole process group.**
+Pressing Ctrl+C makes the terminal driver send SIGINT to *every* process in the
+terminal's **foreground process group**. If the shell and the command it ran are
+in the same group, Ctrl+C kills them both — including the shell. Job control
+exists to put each job in its **own** process group and hand that group the
+terminal, so the signal hits the job alone.
+
+**2. Process groups: `setpgid`.**
+Right after forking each stage, both child and parent call `setpgid`. The first
+stage creates a new group whose id (pgid) is its own pid; later stages join it.
+Doing it in *both* processes closes a race: whichever runs first sets the group,
+and the other's call is a harmless no-op. Now the whole pipeline is one group,
+signalable as a unit with `kill(-pgid, sig)`.
+
+**3. Terminal ownership: `tcsetpgrp`.**
+Exactly one process group "owns" the terminal at a time — that's the foreground
+group the driver sends Ctrl+C/Ctrl+Z to. Before waiting on a foreground job the
+shell calls `tcsetpgrp(terminal, job_pgid)` to give it the terminal; afterward it
+calls `tcsetpgrp(terminal, shell_pgid)` to take it back.
+
+**4. The shell ignores the interactive signals; children restore them.**
+The shell sets SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU to **SIG_IGN**. The
+crucial subtlety: **`exec` preserves an ignored disposition** (it only resets
+*caught* signals to default). So each child must explicitly `signal(SIG_DFL)`
+those before `exec` — otherwise the program you launch would inherit "ignore
+Ctrl+C" and be unkillable. That reset is what makes Ctrl+C work at all.
+
+**5. Detecting a stop: `waitpid(..., WUNTRACED)`.**
+A normal `waitpid` only reports termination. To notice that Ctrl+Z **stopped**
+the job, the foreground wait uses `WUNTRACED`, and `WIFSTOPPED(status)` tells the
+stop apart from an exit. On a stop the shell records a STOPPED job (so `fg`/`bg`
+can resume it) and returns to the prompt. `SIGCONT` (via `fg`/`bg`) wakes it up.
+
+**6. Why `tcsetpgrp` needs SIGTTOU ignored — order matters.**
+When the shell reclaims the terminal it is, for that instant, a *background*
+process touching terminal settings — which normally raises SIGTTOU and stops it.
+The shell must therefore set SIGTTOU to SIG_IGN **before** the first
+`tcsetpgrp`. Get the order wrong and the shell stops itself at startup.
+
+**7. Interactive-only.**
+All of this needs a real controlling terminal. When stdin is a pipe or file
+(`isatty` is false), there's nothing to control, so the `tcsetpgrp` calls are
+skipped (gated on `state->interactive`). Process groups are still created — they
+just don't matter without a terminal. This is what keeps the shell working under
+`printf ... | mysh` for scripted use.
+
+### Bugs & mistakes (and fixes)
+
+**1. Unused-variable warning (real fix).** After switching the executor to track
+the job by its pgid (`pids[0]`) instead of the last stage, the local
+`int n = pipeline->num_commands;` became dead and tripped `-Wunused-variable`.
+Removed it. Zero-warnings rule, so it had to go.
+
+**2. The SIGTTOU/`tcsetpgrp` ordering trap (designed around).** If the SIG_IGN
+for SIGTTOU were set *after* the startup `tcsetpgrp`, the shell could stop itself
+the moment it reclaimed the terminal. The fix is ordering: ignore the interactive
+signals first, *then* do the process-group/terminal setup. Documented inline in
+`install_signal_handlers`.
+
+**3. The "ignored survives exec" trap (designed around).** The reason `Ctrl+C`
+could silently fail to reach a child: `exec` keeps SIG_IGN. `reset_child_signals`
+restores SIG_DFL in every child before exec. *Verified* with a real
+pseudo-terminal harness: Ctrl+C kills `sleep 30` and the shell lives.
+
+**4. The reaper vs. stopped jobs.** The SIGCHLD reaper uses plain
+`waitpid(-1, WNOHANG)` (no WUNTRACED) and is installed with `SA_NOCLDSTOP`, so it
+never consumes *stop* events — only the foreground wait does, via WUNTRACED.
+Without `SA_NOCLDSTOP` the reaper and the foreground wait would fight over who
+sees the stop.
+
+**5. Verification approach.** Job control can't be exercised by piping commands
+in (no tty), so it was tested two ways: piped input for non-regression (pipes,
+redirection, builtins, background still work), and a **Python PTY harness** that
+sends real Ctrl+C (`\x03`) and Ctrl+Z (`\x1a`) and asserts the shell survives,
+stops, and resumes — run against both the normal and the UBSan build.
+
+### Reading the output
+
+```
+mysh> sleep 30
+^C                          ← kills sleep, NOT the shell
+mysh> sleep 30
+^Z
+[1]  Stopped  sleep 30      ← Ctrl+Z stopped it; recorded as a job
+mysh> jobs
+[1]  Stopped  sleep 30
+mysh> fg %1                 ← resume in foreground
+sleep 30
+^C                          ← now kills it; shell still alive
+mysh> sleep 30
+^Z
+[2]  Stopped  sleep 30
+mysh> bg %2                 ← resume in background
+[2] sleep 30 &
+mysh> kill %2               ← SIGTERM to the whole group
+```
+
+### Likely interview questions
+
+- *Why does Ctrl+C normally kill your shell, and how do you stop that?* → the
+  terminal sends SIGINT to the whole foreground process group; put each job in
+  its own group and give that group the terminal (`setpgid` + `tcsetpgrp`) so the
+  signal misses the shell.
+- *What does `setpgid` do, and why call it in both parent and child?* → it sets a
+  process's group; calling it in both closes the fork/exec race so the group is
+  set no matter which runs first.
+- *What is `tcsetpgrp` for?* → it sets which process group is the terminal's
+  foreground group — i.e., who receives terminal-generated signals and may read
+  the terminal.
+- *You set SIGINT to SIG_IGN in the shell — why do children still die on Ctrl+C?*
+  → because each child restores SIG_DFL before exec; if it didn't, the ignore
+  would survive exec (exec only resets caught handlers, not ignored ones).
+- *How do you detect Ctrl+Z (a stop) versus an exit?* → `waitpid` with WUNTRACED,
+  then `WIFSTOPPED`; resume later with SIGCONT.
+- *Why must SIGTTOU be ignored before `tcsetpgrp`?* → reclaiming the terminal is a
+  background-process terminal operation that would otherwise raise SIGTTOU and
+  stop the shell.
+- *How does `kill %1` signal a whole pipeline?* → `kill(-pgid, sig)` — a negative
+  pid targets the entire process group.
+- *How did you test this without typing into a terminal?* → a pseudo-terminal
+  (PTY) harness that injects the raw control characters and checks behavior.
+
+---
+
+*Stage 7 is documented here as it's built — same shape: what was built, key
+concepts, bugs & fixes, and interview Q&A.*

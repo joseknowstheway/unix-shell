@@ -11,14 +11,21 @@
  * to reason about and to test. (Stage 5's jobs table will join it.)
  */
 
+#include <sys/types.h> /* pid_t */
+
 #include "history.h"
 #include "jobs.h"
 
 typedef struct {
-    history_t    history;     /* recently entered command lines */
-    jobs_table_t jobs;        /* background jobs (Stage 5) */
-    int          last_status; /* exit status of the last command (future "$?") */
-    int          should_exit; /* set by the `exit` built-in to end the REPL */
+    history_t    history;       /* recently entered command lines */
+    jobs_table_t jobs;          /* background/stopped jobs (Stage 5–6) */
+    int          last_status;   /* exit status of the last command (future "$?") */
+    int          should_exit;   /* set by the `exit` built-in to end the REPL */
+
+    /* Job control (Stage 6). */
+    int          interactive;   /* 1 if stdin is a terminal (job control on) */
+    int          shell_terminal;/* fd of the controlling terminal (STDIN) */
+    pid_t        shell_pgid;    /* the shell's own process group id */
 } shell_state_t;
 
 #endif /* SHELL_H */

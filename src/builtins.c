@@ -8,15 +8,15 @@
  */
 
 #include "builtins.h"
+#include "executor.h" /* wait_foreground_group */
 #include "signals.h"
 
 #include <errno.h>     /* errno */
-#include <signal.h>    /* kill, SIGTERM, sigset_t */
+#include <signal.h>    /* kill, SIGTERM, SIGCONT */
 #include <stdio.h>     /* fprintf, printf */
 #include <stdlib.h>    /* getenv, setenv, atoi */
 #include <string.h>    /* strcmp, strchr */
-#include <sys/wait.h>  /* waitpid */
-#include <unistd.h>    /* chdir */
+#include <unistd.h>    /* chdir, tcsetpgrp */
 
 /*
  * builtin_cd — change the working directory.
@@ -107,10 +107,11 @@ static int parse_job_id(const char *arg)
 }
 
 /*
- * builtin_fg — bring a background job to the foreground and wait for it.
- * Without process groups (Stage 6) this is simply a blocking waitpid on the
- * job's pid. SIGCHLD is blocked across the lookup and wait so the reaper can't
- * collect the child first (which would make our waitpid fail).
+ * builtin_fg — bring a job to the foreground and wait for it.
+ * Gives the job the terminal, resumes it with SIGCONT if it was stopped, then
+ * waits via the shared wait_foreground_group (which handles a second Ctrl+Z),
+ * and reclaims the terminal afterward. SIGCHLD is blocked across the whole thing
+ * so the async reaper can't collect the job first.
  */
 static int builtin_fg(const command_t *cmd, shell_state_t *state)
 {
@@ -130,30 +131,66 @@ static int builtin_fg(const command_t *cmd, shell_state_t *state)
         return 1;
     }
 
-    pid_t pid = job->pid;
+    pid_t pgid = job->pid;
     printf("%s\n", job->command); /* bash echoes the resumed command */
 
-    int code = 0;
-    if (job->state == JOB_RUNNING) {
-        int status;
-        if (waitpid(pid, &status, 0) > 0) {
-            if (WIFEXITED(status)) {
-                code = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                code = 128 + WTERMSIG(status);
-            }
-        }
+    if (state->interactive) {
+        tcsetpgrp(state->shell_terminal, pgid);
     }
-    jobs_remove_by_id(&state->jobs, id);
+    /* If it was stopped (Ctrl+Z), continue the whole group before waiting. */
+    if (job->state == JOB_STOPPED) {
+        job->state = JOB_RUNNING;
+        kill(-pgid, SIGCONT);
+    }
+
+    int code = wait_foreground_group(state, pgid, job->command);
+
+    if (state->interactive) {
+        tcsetpgrp(state->shell_terminal, state->shell_pgid);
+    }
 
     unblock_sigchld(&prev);
     return code;
 }
 
 /*
- * builtin_kill — send SIGTERM to a job ("%N") or a raw pid. The dying child
- * raises SIGCHLD, so the reaper marks the job done and the next prompt reports
- * it — we don't reap here.
+ * builtin_bg — resume a stopped job in the background.
+ * Continues the job's process group with SIGCONT and leaves it running detached.
+ */
+static int builtin_bg(const command_t *cmd, shell_state_t *state)
+{
+    int id = parse_job_id(cmd->args[1]);
+    if (id < 0) {
+        fprintf(stderr, "mysh: bg: usage: bg %%jobid\n");
+        return 1;
+    }
+
+    sigset_t prev;
+    block_sigchld(&prev);
+
+    job_t *job = jobs_find_by_id(&state->jobs, id);
+    if (job == NULL) {
+        unblock_sigchld(&prev);
+        fprintf(stderr, "mysh: bg: %s: no such job\n", cmd->args[1]);
+        return 1;
+    }
+
+    if (job->state == JOB_STOPPED) {
+        job->state = JOB_RUNNING;
+        kill(-job->pid, SIGCONT);
+        printf("[%d] %s &\n", job->job_id, job->command);
+    } else {
+        fprintf(stderr, "mysh: bg: job %d is already running\n", job->job_id);
+    }
+
+    unblock_sigchld(&prev);
+    return 0;
+}
+
+/*
+ * builtin_kill — send SIGTERM to a job ("%N") or a raw pid. For a job we signal
+ * the whole process GROUP (kill with a negative pgid). The dying child raises
+ * SIGCHLD, so the reaper marks the job done and the next prompt reports it.
  */
 static int builtin_kill(const command_t *cmd, shell_state_t *state)
 {
@@ -162,7 +199,7 @@ static int builtin_kill(const command_t *cmd, shell_state_t *state)
         return 1;
     }
 
-    pid_t pid;
+    pid_t target; /* positive: a single pid; negative: a whole process group */
     if (cmd->args[1][0] == '%') {
         int id = parse_job_id(cmd->args[1]);
         sigset_t prev;
@@ -173,13 +210,13 @@ static int builtin_kill(const command_t *cmd, shell_state_t *state)
             fprintf(stderr, "mysh: kill: %s: no such job\n", cmd->args[1]);
             return 1;
         }
-        pid = job->pid;
+        target = -job->pid; /* negate the pgid to signal the whole group */
         unblock_sigchld(&prev);
     } else {
-        pid = (pid_t)atoi(cmd->args[1]);
+        target = (pid_t)atoi(cmd->args[1]);
     }
 
-    if (kill(pid, SIGTERM) != 0) {
+    if (kill(target, SIGTERM) != 0) {
         perror("mysh: kill");
         return 1;
     }
@@ -194,8 +231,9 @@ static int builtin_help(void)
     printf("  exit [code]       exit the shell (default: last command's status)\n");
     printf("  export NAME=VALUE set an environment variable for child processes\n");
     printf("  history           list previously entered commands\n");
-    printf("  jobs              list background jobs\n");
-    printf("  fg %%jobid         wait for a background job in the foreground\n");
+    printf("  jobs              list background and stopped jobs\n");
+    printf("  fg %%jobid         resume a job in the foreground\n");
+    printf("  bg %%jobid         resume a stopped job in the background\n");
     printf("  kill %%jobid|pid   send SIGTERM to a job or pid\n");
     printf("  help              show this message\n");
     printf("\n");
@@ -211,6 +249,7 @@ int is_builtin(const char *name)
            strcmp(name, "history") == 0 ||
            strcmp(name, "jobs") == 0 ||
            strcmp(name, "fg") == 0 ||
+           strcmp(name, "bg") == 0 ||
            strcmp(name, "kill") == 0 ||
            strcmp(name, "help") == 0;
 }
@@ -237,6 +276,9 @@ int run_builtin(const command_t *cmd, shell_state_t *state)
     }
     if (strcmp(name, "fg") == 0) {
         return builtin_fg(cmd, state);
+    }
+    if (strcmp(name, "bg") == 0) {
+        return builtin_bg(cmd, state);
     }
     if (strcmp(name, "kill") == 0) {
         return builtin_kill(cmd, state);

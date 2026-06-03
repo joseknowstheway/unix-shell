@@ -15,7 +15,7 @@
 
 - [Stage 1 — The Read-Eval Loop](#stage-1--the-read-eval-loop)
 - [Stage 2 — Pipes](#stage-2--pipes)
-- [Stage 3 — I/O Redirection](#stage-3--io-redirection) *(upcoming)*
+- [Stage 3 — I/O Redirection](#stage-3--io-redirection)
 - [Stage 4 — Built-in Commands](#stage-4--built-in-commands) *(upcoming)*
 - [Stage 5 — Background Processes](#stage-5--background-processes) *(upcoming)*
 - [Stage 6 — Signal Handling & Job Control](#stage-6--signal-handling--job-control) *(upcoming)*
@@ -328,5 +328,141 @@ mysh>
 
 ---
 
-*Stages 3–7 are documented here as they're built — one section each, same shape:
+## Stage 3 — I/O Redirection
+
+**Files:** `parser.c`, `parser.h`, `executor.c` (+ `main.c` wiring)
+**Goal:** send a command's output to a file (`>`), append to it (`>>`), or feed
+its input from a file (`<`) — and have these compose with pipes.
+
+### Key concepts
+
+**1. Redirection is the *same* `dup2` trick as pipes, aimed at a file.**
+Stage 2 pointed a child's stdout at a pipe's write end. Redirection points it at
+an **open file descriptor** instead. `open()` returns an fd for the file;
+`dup2(fd, STDOUT_FILENO)` makes fd 1 a copy of it, so the unchanged program
+writes to "stdout" and the bytes land in the file. Input is the mirror image:
+`dup2(fd, STDIN_FILENO)`. Pipes and files are interchangeable behind a file
+descriptor — that uniformity ("everything is a file descriptor") is one of Unix's
+core design ideas, and this stage is it in miniature.
+
+**2. The `open()` flags ARE the feature.**
+The only difference between overwrite and append is the flag set:
+- `>`  → `O_WRONLY | O_CREAT | O_TRUNC`  — create if absent, else truncate to 0.
+- `>>` → `O_WRONLY | O_CREAT | O_APPEND` — create if absent, else each write
+  seeks to end first (atomically, even with concurrent writers).
+- `<`  → `O_RDONLY` — open existing file for reading; no create.
+
+The third argument to `open` (`0644`) is the permission mode for a newly created
+file, modified by the process umask. It's ignored when no file is created.
+
+**3. Where redirection is applied — child only, and *after* pipe wiring.**
+`apply_redirection` runs inside the child, at the top of `exec_child`, which is
+*after* the pipeline code has already dup2'd any pipe ends onto stdin/stdout. So
+an explicit file redirection **overrides** the pipe default. That's the correct
+precedence: in `a | b > out`, `b`'s stdout must go to the file, not onward; in
+`sort < in | head`, `sort`'s stdin comes from the file while its stdout still
+feeds the pipe. Putting redirection in the shared `exec_child` means both the
+single-command and pipeline paths get it for free.
+
+**4. Close the fd after `dup2`.**
+Once `dup2(fd, STDOUT_FILENO)` has copied the file onto fd 1, the original `fd`
+number is redundant — we `close(fd)` immediately. Same discipline as pipes:
+don't leave extra descriptors open. (Leaving a file fd open is less catastrophic
+than a pipe fd — it won't hang anything — but it's a descriptor leak, and on a
+long-running shell descriptors are finite.)
+
+**5. Parsing: operators are tokens, not arguments.**
+The parser recognizes `<`, `>`, `>>` as their own tokens, takes the **next**
+token as the filename, and stores them in `command_t.input_file` /
+`output_file` / `append_mode` — adding *none* of them to `args`. The program
+itself never sees the operator or the filename; it just finds its standard
+streams already redirected. That's exactly how a real shell works:
+`wc -l < file` runs `wc` with argv `["wc","-l"]` and stdin attached to the file,
+which is why it prints just a number with no filename (unlike `wc -l file`).
+
+**6. Syntax errors and a new `-1` return contract.**
+A dangling operator like `ls >` has no filename. `parse_command` now returns
+`-1` (distinct from `0` = blank line) after printing
+`mysh: syntax error: expected filename after '>'`; `parse_pipeline` propagates
+it, and `main` treats `<= 0` as "nothing to run." A bad filename at runtime
+(e.g. `< nonexistent`) is caught by `open` in the child, which reports and exits
+with failure — the shell itself is untouched.
+
+### Bugs & mistakes (and fixes)
+
+Like Stage 2, this compiled clean and ran leak-free on the first build — because
+the one genuine design subtlety was handled deliberately. The points worth
+recording:
+
+**1. The precedence ordering (the real design decision).**
+The trap: if file redirection were applied *before* the pipe `dup2`s (or in the
+pipeline code instead of `exec_child`), then `a | b > out` would let the pipe
+clobber the file redirection and `b`'s output would go to the wrong place. Fix /
+decision: apply redirection **after** all pipe wiring, inside `exec_child`, so the
+explicit file always wins. Verified live with both `ls src | grep .c > file`
+(redirect on the last stage) and `sort < file | head -1` (redirect on the first
+stage).
+
+**2. Distinguishing "blank line" from "syntax error."**
+Before Stage 3, `parse_*` returned `0` for "nothing." Redirection needs a third
+outcome — a real error the user should see. Rather than overload `0`, the contract
+grew a `-1` case, and `main`'s check changed from `== 0` to `<= 0`. Small, but it
+keeps "empty input" (silent re-prompt) and "you typed something invalid" (printed
+error) cleanly separate.
+
+**3. Known limitations, accepted for now.**
+- **Attached operators** aren't supported: you must write `ls > out.txt`, not
+  `ls >out.txt`. The token-based parser treats `>out.txt` as one token. Bash
+  splits it; we don't (yet).
+- **Redirection with no command** (`> file` alone, which bash uses to truncate a
+  file) is a no-op here — a zero-arg segment is skipped before any file is
+  touched.
+Both are candidates for the Stage 7 polish pass and are documented in `parser.h`.
+
+### Reading the output
+
+```
+mysh> echo first line  > /tmp/t.txt
+mysh> echo second line >> /tmp/t.txt     ← append, doesn't clobber
+mysh> cat /tmp/t.txt
+first line
+second line
+mysh> grep second < /tmp/t.txt           ← stdin from file
+second line
+mysh> wc -l < /tmp/t.txt                  ← just a number (no filename arg)
+       2
+mysh> ls src | grep .c > /tmp/c.txt       ← pipe AND redirect together
+mysh> cat < /tmp/nonexistent
+mysh: /tmp/nonexistent: No such file or directory
+mysh> ls >
+mysh: syntax error: expected filename after '>'
+```
+
+### Likely interview questions
+
+- *How does output redirection actually work?* → `open` the file, `dup2` its fd
+  onto STDOUT_FILENO so the program's stdout writes go to the file, then close
+  the original fd.
+- *What's the difference between `>` and `>>` at the syscall level?* → the open
+  flags: `O_TRUNC` empties the file first; `O_APPEND` makes every write go to the
+  current end. Everything else is identical.
+- *Why is `wc -l < file` different from `wc -l file`?* → with `<`, the shell
+  attaches the file to `wc`'s stdin and `wc` sees no filename argument (so it
+  prints only the count); with `file`, `wc` opens it itself and prints the name
+  too.
+- *How do redirection and pipes interact in `a | b > out`?* → both use `dup2`;
+  redirection is applied after the pipe wiring so the file wins — `b`'s output
+  goes to `out`, not to a downstream pipe.
+- *Where do you apply the redirection — parent or child?* → the child, after fork
+  and after any pipe setup, before exec; it must not affect the shell's own fds.
+- *What's the third argument to `open` and when does it matter?* → the permission
+  mode for a newly created file (e.g. 0644), masked by umask; ignored if the file
+  already exists or isn't being created.
+- *How do you handle a redirection to a file you can't open?* → `open` fails in
+  the child; report via `strerror(errno)` and exit the child with failure, leaving
+  the shell running.
+
+---
+
+*Stages 4–7 are documented here as they're built — one section each, same shape:
 what was built, key concepts, bugs & fixes, and interview Q&A.*

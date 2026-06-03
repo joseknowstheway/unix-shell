@@ -54,8 +54,10 @@ int main(void)
          * alive through step 4 (it does — we don't touch it again until the next
          * loop iteration). */
         pipeline_t pipeline;
-        if (parse_pipeline(line, &pipeline) == 0) {
-            continue; /* blank line — just re-prompt */
+        if (parse_pipeline(line, &pipeline) <= 0) {
+            /* 0 = blank line; -1 = syntax error (already reported). Either way,
+             * nothing to run — just re-prompt. */
+            continue;
         }
 
         /* `exit` is handled inline here so the loop has a clean way to

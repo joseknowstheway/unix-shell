@@ -25,11 +25,51 @@
 #include "executor.h"
 
 #include <errno.h>     /* errno */
+#include <fcntl.h>     /* open, O_* flags */
 #include <stdio.h>     /* fprintf */
 #include <stdlib.h>    /* exit, EXIT_FAILURE */
 #include <string.h>    /* strerror */
 #include <sys/wait.h>  /* waitpid, WIFEXITED, WEXITSTATUS, WIFSIGNALED */
 #include <unistd.h>    /* fork, execvp, pipe, dup2, close */
+
+/* Permission bits for files created by '>' / '>>': rw-r--r-- before umask. */
+#define OUTPUT_FILE_MODE 0644
+
+/*
+ * apply_redirection — point the child's stdin/stdout at files, if requested.
+ *
+ * This is the same dup2 trick that wires pipes, aimed at an open file instead of
+ * a pipe end. Called from exec_child AFTER any pipe wiring, so an explicit file
+ * redirection correctly overrides the pipeline default (e.g. in "a | b > out",
+ * b's stdout goes to the file, not onward). Runs only in the child; on any error
+ * it reports and exits so the failure can't leak back into the shell.
+ */
+static void apply_redirection(const command_t *cmd)
+{
+    if (cmd->input_file != NULL) {
+        int fd = open(cmd->input_file, O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "mysh: %s: %s\n", cmd->input_file, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+    }
+
+    if (cmd->output_file != NULL) {
+        /* O_CREAT makes the file if absent; then either truncate to empty (">")
+         * or seek to the end before each write (">>"). The flag choice is the
+         * entire difference between overwrite and append. */
+        int flags = O_WRONLY | O_CREAT | (cmd->append_mode ? O_APPEND : O_TRUNC);
+        int fd = open(cmd->output_file, flags, OUTPUT_FILE_MODE);
+        if (fd < 0) {
+            fprintf(stderr, "mysh: %s: %s\n", cmd->output_file, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+}
 
 /*
  * exec_child — replace the current (child) process with cmd's program.
@@ -41,6 +81,9 @@
  */
 static void exec_child(const command_t *cmd)
 {
+    /* Redirect files last so they win over any pipe wiring already in place. */
+    apply_redirection(cmd);
+
     execvp(cmd->args[0], cmd->args);
 
     /* Reached only if execvp failed. We print the command name ourselves (plain

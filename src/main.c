@@ -1,31 +1,37 @@
 /*
- * main.c — the Read-Eval-Print loop (Stage 1).
+ * main.c — the Read-Eval-Print loop (Stages 1–4).
  *
  * Every shell, from this one to bash, is the same five-step loop running
  * forever:
  *
  *   1. print a prompt
  *   2. read a line of input
- *   3. parse it into a command
- *   4. execute the command
+ *   3. parse it into a pipeline of commands
+ *   4. execute the pipeline
  *   5. go back to 1
  *
- * Stage 1 builds that skeleton for single commands. Pipes, redirection,
- * built-ins, jobs, and signals all hang off these same five steps in later
- * stages.
+ * Stage 4 adds built-in commands. A built-in given as a plain command runs HERE,
+ * in the shell process, so its effect (cd, export, exit, history) persists.
+ * Built-ins inside a pipeline are handled by the executor in a forked child
+ * instead (subshell semantics).
  */
 
 #include "parser.h"
 #include "executor.h"
+#include "builtins.h"
+#include "shell.h"
 
 #include <stdio.h>  /* printf, fflush, getline */
 #include <stdlib.h> /* free */
-#include <string.h> /* strcmp */
 
 #define PROMPT "mysh> "
 
 int main(void)
 {
+    /* All shell-process state in one place (zero-initialized: empty history,
+     * status 0, not exiting). */
+    shell_state_t state = {0};
+
     /* getline() manages this buffer for us: pass a NULL pointer and 0 size the
      * first time and it allocates; on later calls it reuses or grows the same
      * buffer. We free it once at the very end. */
@@ -41,39 +47,46 @@ int main(void)
 
         /* 2. Read one line. getline returns the length including the trailing
          * '\n', or -1 at end-of-file. Ctrl+D on an empty line is EOF, which is
-         * how a user cleanly exits an interactive shell — we mirror that by
-         * printing a newline and stopping. */
+         * how a user cleanly exits an interactive shell. */
         ssize_t len = getline(&line, &line_cap, stdin);
         if (len < 0) {
             printf("\n");
             break;
         }
 
+        /* Record the raw line before parsing mutates it. history_add ignores
+         * blank lines and takes its own copy. */
+        history_add(&state.history, line);
+
         /* 3. Parse. parse_pipeline splits `line` on '|' and tokenizes it in
          * place; the resulting pointers borrow from `line`, so `line` must stay
-         * alive through step 4 (it does — we don't touch it again until the next
-         * loop iteration). */
+         * alive through step 4. */
         pipeline_t pipeline;
         if (parse_pipeline(line, &pipeline) <= 0) {
-            /* 0 = blank line; -1 = syntax error (already reported). Either way,
-             * nothing to run — just re-prompt. */
+            /* 0 = blank line; -1 = syntax error (already reported). */
             continue;
         }
 
-        /* `exit` is handled inline here so the loop has a clean way to
-         * terminate. Only a bare `exit` (a one-command pipeline) counts —
-         * `exit | cat` runs exit in a child and must NOT kill the shell. In
-         * Stage 4 this moves into builtins.c, where it can honor an exit code. */
+        /* 4. Execute.
+         * A built-in given as a single, standalone command runs in THIS process
+         * so it can change our directory/environment/etc. Anything with a pipe
+         * goes to the executor, which runs each stage (built-in or not) in a
+         * forked child. */
         if (pipeline.num_commands == 1 &&
-            strcmp(pipeline.commands[0].args[0], "exit") == 0) {
-            break;
+            is_builtin(pipeline.commands[0].args[0])) {
+            state.last_status = run_builtin(&pipeline.commands[0], &state);
+        } else {
+            state.last_status = execute_pipeline(&pipeline, &state);
         }
 
-        /* 4. Execute and loop. (The return status is ignored for now; a future
-         * "$?" built-in will want it.) */
-        execute_pipeline(&pipeline);
+        /* The `exit` built-in sets this instead of calling exit() directly, so
+         * we can fall out of the loop and free everything cleanly. */
+        if (state.should_exit) {
+            break;
+        }
     }
 
     free(line);
-    return 0;
+    history_free(&state.history);
+    return state.last_status;
 }

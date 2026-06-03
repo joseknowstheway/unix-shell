@@ -23,6 +23,7 @@
  */
 
 #include "executor.h"
+#include "builtins.h"
 
 #include <errno.h>     /* errno */
 #include <fcntl.h>     /* open, O_* flags */
@@ -79,10 +80,19 @@ static void apply_redirection(const command_t *cmd)
  * success the image is replaced; on failure it reports and exits, so a failed
  * child can never fall back into the shell's REPL and become a second shell.
  */
-static void exec_child(const command_t *cmd)
+static void exec_child(const command_t *cmd, shell_state_t *state)
 {
     /* Redirect files last so they win over any pipe wiring already in place. */
     apply_redirection(cmd);
+
+    /* A built-in reached here is one stage of a pipeline (e.g. "history | grep
+     * x"). It runs in THIS child, so its output flows through the pipe and any
+     * shell-state change (cd, export) dies with the child — bash's subshell
+     * semantics. The single-command case is handled in the shell process by
+     * main, never here. */
+    if (is_builtin(cmd->args[0])) {
+        exit(run_builtin(cmd, state));
+    }
 
     execvp(cmd->args[0], cmd->args);
 
@@ -108,7 +118,7 @@ static int status_to_code(int status)
     return 0;
 }
 
-int execute_command(const command_t *cmd)
+int execute_command(const command_t *cmd, shell_state_t *state)
 {
     pid_t pid = fork();
 
@@ -119,7 +129,7 @@ int execute_command(const command_t *cmd)
 
     if (pid == 0) {
         /* ── CHILD ── no fds to rewire for a lone command; just exec. */
-        exec_child(cmd);
+        exec_child(cmd, state);
     }
 
     /* ── PARENT ── wait for exactly this child. */
@@ -131,13 +141,13 @@ int execute_command(const command_t *cmd)
     return status_to_code(status);
 }
 
-int execute_pipeline(const pipeline_t *pipeline)
+int execute_pipeline(const pipeline_t *pipeline, shell_state_t *state)
 {
     int n = pipeline->num_commands;
 
     /* A pipeline of one is just a normal command — reuse the simple path. */
     if (n == 1) {
-        return execute_command(&pipeline->commands[0]);
+        return execute_command(&pipeline->commands[0], state);
     }
 
     /* prev_read holds the read end of the PREVIOUS command's output pipe, which
@@ -177,7 +187,7 @@ int execute_pipeline(const pipeline_t *pipeline)
                 dup2(pipefd[1], STDOUT_FILENO);
                 close(pipefd[1]);
             }
-            exec_child(&pipeline->commands[i]);
+            exec_child(&pipeline->commands[i], state);
         }
 
         /* ── PARENT ──

@@ -16,7 +16,7 @@
 - [Stage 1 — The Read-Eval Loop](#stage-1--the-read-eval-loop)
 - [Stage 2 — Pipes](#stage-2--pipes)
 - [Stage 3 — I/O Redirection](#stage-3--io-redirection)
-- [Stage 4 — Built-in Commands](#stage-4--built-in-commands) *(upcoming)*
+- [Stage 4 — Built-in Commands](#stage-4--built-in-commands)
 - [Stage 5 — Background Processes](#stage-5--background-processes) *(upcoming)*
 - [Stage 6 — Signal Handling & Job Control](#stage-6--signal-handling--job-control) *(upcoming)*
 - [Stage 7 — Polish & Presentation](#stage-7--polish--presentation) *(upcoming)*
@@ -464,5 +464,150 @@ mysh: syntax error: expected filename after '>'
 
 ---
 
-*Stages 4–7 are documented here as they're built — one section each, same shape:
+## Stage 4 — Built-in Commands
+
+**Files:** `builtins.c`, `builtins.h`, `history.c`, `history.h`, `shell.h`
+(+ `executor.{c,h}` and `main.c` wiring)
+**Goal:** implement `cd`, `exit`, `export`, `history`, and `help` as commands the
+shell runs *itself*, not as forked child processes.
+
+### Key concepts
+
+**1. Why built-ins can't be forked (the whole point of the stage).**
+A child process is a *copy* of the shell with its own address space and its own
+kernel state. If `cd` ran in a forked child, the child's `chdir()` would change
+*that child's* working directory and then the child would exit — the shell's
+directory is untouched. Same logic for `export` (must edit the shell's own
+environment so future children inherit it), `exit` (must end the shell, not a
+child), and `history` (must read the shell's own list). So these run *in the
+shell process*: `main` checks `is_builtin()` and calls `run_builtin()` directly,
+with no fork in between.
+
+**2. Detection happens before the fork.**
+The dispatch order is: parse → is it a single command that's a built-in? → if so,
+run in-process; otherwise fork/exec. Getting this order right is what makes `cd`
+work at all — fork first and you've already lost.
+
+**3. Built-ins inside a pipeline run in a subshell (the subtle, correct bit).**
+`history | grep cd` should work — `history` produces output that flows into
+`grep`. But that `history` (and any built-in in a pipeline) runs in the *forked
+child*, because a pipeline stage needs its own stdout wired to the pipe. A
+consequence, which is exactly bash's behavior: `cd /tmp | wc` does **not** change
+your shell's directory, because the `cd` ran in a child that immediately exited.
+The code expresses this cleanly: `exec_child` (only ever called in a child)
+checks `is_builtin` and runs the built-in there; the single-command path in
+`main` is the only one that runs a built-in in the shell process. Verified live —
+`cd /tmp | wc -c` followed by `pwd` still shows the original directory.
+
+**4. `cd` and `export` are thin wrappers over libc/syscalls.**
+`cd` is `chdir(dir)` with a default of `getenv("HOME")`. `export NAME=VALUE`
+splits on `=` and calls `setenv(name, value, 1)` (the `1` = overwrite). Because
+`setenv` edits the shell's environment, every later child inherits it across
+fork/exec — provable with `printenv MYVAR` (which reads the environment directly).
+
+**5. Note: `$VAR` expansion is NOT this stage.**
+`export MYVAR=hello` then `echo $MYVAR` prints the literal `$MYVAR`, because
+variable *expansion* is a separate parsing feature (a Stage 7 stretch goal). The
+export still works — it's just that our parser doesn't yet substitute `$VAR`
+before running a command. The honest way to demonstrate `export` is `printenv
+MYVAR` or `env | grep MYVAR`, which need no shell expansion.
+
+**6. History as a ring buffer.**
+`history.c` keeps the last `HISTORY_CAPACITY` (1000) commands in a fixed array
+used circularly: `next` is the write cursor, and once full it overwrites the
+oldest slot with no shifting (O(1) insert). A separate `total` counter numbers
+the displayed lines like bash, so the numbers keep climbing even after old
+commands age out. Each line is `strdup`'d on entry and freed at shutdown — which
+is why the leak check still reports zero.
+
+**7. `exit` sets a flag instead of calling `exit()`.**
+The obvious `builtin_exit` would just call the libc `exit()`. But that would jump
+over the REPL's cleanup (`free(line)`, `history_free`), and under the `leaks`
+tool those un-freed allocations would show up as leaks. Instead `builtin_exit`
+sets `state->should_exit`; `main` sees it, breaks the loop, frees everything, and
+returns the code. Clean teardown, clean leak report.
+
+**8. One state struct, threaded explicitly (no globals).**
+`shell_state_t` (history + last status + the exit flag) is passed by pointer into
+the executor rather than living in globals. It's easier to reason about and test,
+and it's the same context-threading discipline used in the packet-sniffer project
+(which passed a context via libpcap's user pointer). Stage 5's jobs table will
+join this struct.
+
+### Bugs & mistakes (and fixes)
+
+**1. `const`-qualifier warning — a real fix this stage.**
+First build threw two `-Wincompatible-pointer-types-discards-qualifiers`
+warnings: `run_builtin` takes `const command_t *cmd`, so `cmd->args` has type
+`char *const *` (the pointers are const), but `builtin_cd`/`builtin_export` were
+declared `char **args`. Passing the const-pointer array to a non-const parameter
+discards the qualifier. Two valid fixes existed — drop the `const` on `cmd`, or
+make the helpers const-correct. I chose the latter: `char *const *args`. The
+helpers only *read* the `args` array (and `export` mutates the *string contents*
+via its own `char *`, which `char *const *` still permits), so const-correctness
+cost nothing and kept `const command_t` intact. Zero warnings is a hard rule
+here, so this had to be fixed, not suppressed.
+
+**2. The leak trap in `exit` (avoided by design).**
+Covered above: calling `exit()` from the built-in would have left `line` and the
+history buffer un-freed at the moment the process died, and `make leaks` would
+report them. The flag-and-unwind approach keeps the teardown path intact. This is
+the kind of thing that only shows up *because* we run a leak checker every stage.
+
+**3. Known limitation: redirection on a single built-in.**
+`history > out.txt` typed as a standalone command does **not** redirect — the
+single-built-in path in `main` runs in the shell process and skips
+`apply_redirection` (only the fork/exec path applies it). Inside a pipeline it
+*would* redirect (it goes through `exec_child`). Documented; a Stage 7 polish
+candidate (save/restore the shell's fds around an in-process built-in).
+
+### Reading the output
+
+```
+mysh> pwd
+/Users/.../unix-shell
+mysh> cd /tmp
+mysh> pwd
+/private/tmp                 ← cd changed the SHELL's directory
+mysh> cd /tmp | wc -c
+       0
+mysh> pwd
+/Users/.../unix-shell        ← cd in a pipeline did NOT (subshell)
+mysh> export MYVAR=hello
+mysh> printenv MYVAR
+hello                        ← child inherited the exported var
+mysh> history | grep cd
+    2  cd /tmp
+mysh> exit 7                 ← shell exits with status 7
+```
+
+### Likely interview questions
+
+- *Why can't `cd` be implemented as an external program / forked child?* → it
+  would `chdir` in the child, which then exits; the parent shell's working
+  directory is unaffected. It must run in the shell process.
+- *Which commands must be built-ins and why?* → `cd` (cwd), `exit` (terminate the
+  shell), `export`/`unset` (shell environment), `history` (shell's own state) —
+  anything that mutates the shell itself rather than doing work in a child.
+- *What happens to `cd` in a pipeline like `cd /x | cmd`?* → it runs in a
+  subshell (forked child), so it has no effect on the parent shell — exactly
+  bash's behavior.
+- *How does `export` make a variable visible to programs you run?* → `setenv` on
+  the shell's environment; `fork` copies the environment and `exec*` (the `e`-less
+  variants use `environ`) passes it to the new program.
+- *Why doesn't `echo $VAR` print the value yet?* → variable expansion is a
+  separate parsing step we haven't added; `export` sets the env, but the parser
+  doesn't substitute `$VAR` into argv. `printenv VAR` proves the env is set.
+- *How is command history stored?* → a fixed-size ring buffer (O(1) insert,
+  overwrites oldest when full) with a running total for bash-style numbering;
+  entries are heap copies freed at exit.
+- *Why set a flag for `exit` instead of calling exit()?* → to unwind through the
+  REPL and free resources, so shutdown is clean (and the leak checker stays at
+  zero).
+- *How did you avoid global state for the shell's data?* → a single
+  `shell_state_t` passed by pointer into the executor.
+
+---
+
+*Stages 5–7 are documented here as they're built — one section each, same shape:
 what was built, key concepts, bugs & fixes, and interview Q&A.*

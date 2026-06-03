@@ -1,39 +1,43 @@
 /*
- * parser.c — whitespace tokenizer (Stage 1).
+ * parser.c — pipeline splitter + whitespace tokenizer (Stages 1–2).
  *
- * strtok() is the classic tool for this: hand it a string and a set of
- * delimiter characters, and it returns one token at a time, overwriting each
- * delimiter it finds with '\0'. That's why the input line must be writable and
- * must outlive the resulting command_t — the tokens are slices of the original
- * buffer, not copies.
+ * Parsing happens in two passes:
  *
- * Later stages will graduate to a smarter scan (pipes, then redirection
- * operators), but for single commands strtok is exactly enough.
+ *   1. parse_pipeline splits the line on '|' into segments.
+ *   2. parse_command splits each segment on whitespace into argv tokens.
+ *
+ * Both passes use strtok_r — the reentrant cousin of strtok. Plain strtok keeps
+ * its progress in a single hidden global, so a tokenization running inside
+ * another tokenization would clobber it. strtok_r hands that state back to us in
+ * an explicit `saveptr`, so the inner pass (parse_command) and the outer pass
+ * (parse_pipeline) keep separate bookmarks and never interfere. Each token is a
+ * slice of the original buffer (the delimiter is overwritten with '\0'), which
+ * is why the input line must be writable and must outlive the parse output.
  */
 
 #include "parser.h"
 
-#include <string.h> /* strtok */
+#include <string.h> /* strtok_r, memset */
 
-/* Characters that separate tokens: space, tab, and the line's trailing newline. */
+/* Whitespace that separates argument tokens: space, tab, trailing newline. */
 #define TOKEN_DELIMITERS " \t\r\n"
 
-int parse_command(char *line, command_t *cmd)
+/* The pipeline operator. */
+#define PIPE_DELIMITER "|"
+
+int parse_command(char *segment, command_t *cmd)
 {
-    /* Start every parse from a clean slate so stale pointers from a previous
-     * command can never leak through into this one. */
+    /* Start from a clean slate so stale pointers from a previous command can
+     * never leak through into this one. */
     memset(cmd, 0, sizeof(*cmd));
 
-    cmd->argc = 0;
-
-    /* strtok keeps internal state between calls: the first call takes the
-     * string, every subsequent call passes NULL to mean "same string, next
-     * token". It returns NULL when the tokens run out. */
-    char *token = strtok(line, TOKEN_DELIMITERS);
+    /* strtok_r's bookmark lives here on our stack, not in a global. */
+    char *saveptr = NULL;
+    char *token = strtok_r(segment, TOKEN_DELIMITERS, &saveptr);
     while (token != NULL && cmd->argc < MAX_ARGS - 1) {
         cmd->args[cmd->argc] = token;
         cmd->argc++;
-        token = strtok(NULL, TOKEN_DELIMITERS);
+        token = strtok_r(NULL, TOKEN_DELIMITERS, &saveptr);
     }
 
     /* execvp() requires the argument vector to end in a NULL sentinel so it
@@ -41,4 +45,28 @@ int parse_command(char *line, command_t *cmd)
     cmd->args[cmd->argc] = NULL;
 
     return cmd->argc;
+}
+
+int parse_pipeline(char *line, pipeline_t *pipeline)
+{
+    memset(pipeline, 0, sizeof(*pipeline));
+
+    /* Outer pass: carve the line into '|'-separated segments. This pass must
+     * fully hand each segment to parse_command before pulling the next one — its
+     * saveptr is independent of parse_command's, so even nested calls are safe. */
+    char *saveptr = NULL;
+    char *segment = strtok_r(line, PIPE_DELIMITER, &saveptr);
+    while (segment != NULL && pipeline->num_commands < MAX_COMMANDS) {
+        command_t *cmd = &pipeline->commands[pipeline->num_commands];
+
+        /* A non-empty segment becomes the next stage of the pipeline. An empty
+         * one (e.g. "ls |  | grep") contributes no command — we skip it instead
+         * of erroring, a Stage 2 simplification noted in parser.h. */
+        if (parse_command(segment, cmd) > 0) {
+            pipeline->num_commands++;
+        }
+        segment = strtok_r(NULL, PIPE_DELIMITER, &saveptr);
+    }
+
+    return pipeline->num_commands;
 }

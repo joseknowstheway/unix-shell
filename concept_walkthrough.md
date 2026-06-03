@@ -14,7 +14,7 @@
 ## Table of Contents
 
 - [Stage 1 — The Read-Eval Loop](#stage-1--the-read-eval-loop)
-- [Stage 2 — Pipes](#stage-2--pipes) *(upcoming)*
+- [Stage 2 — Pipes](#stage-2--pipes)
 - [Stage 3 — I/O Redirection](#stage-3--io-redirection) *(upcoming)*
 - [Stage 4 — Built-in Commands](#stage-4--built-in-commands) *(upcoming)*
 - [Stage 5 — Background Processes](#stage-5--background-processes) *(upcoming)*
@@ -187,5 +187,146 @@ mysh> exit
 
 ---
 
-*Stages 2–7 are documented here as they're built — one section each, same shape:
+## Stage 2 — Pipes
+
+**Files:** `parser.c`, `parser.h`, `executor.c`, `executor.h` (+ `main.c` wiring)
+**Goal:** chain commands with `|` so one command's stdout becomes the next one's
+stdin. `ls -la | grep .c`, `cat /etc/passwd | grep root | wc -l`, and
+`echo hi | tr a-z A-Z` all work.
+
+### Key concepts
+
+**1. What a pipe actually is.**
+`pipe(int fds[2])` asks the kernel for a one-way, in-memory FIFO buffer and
+returns two file descriptors onto it: `fds[0]` is the **read** end, `fds[1]` is
+the **write** end. Bytes written to `fds[1]` come out of `fds[0]`, in order. It's
+the same primitive the kernel uses everywhere; a shell pipeline is just two
+processes sharing one.
+
+**2. `dup2(oldfd, newfd)` — redirecting a standard stream.**
+A child still runs a normal program like `grep` that reads from fd 0 (stdin) and
+writes to fd 1 (stdout) — it knows nothing about pipes. `dup2(pipefd[1],
+STDOUT_FILENO)` makes fd 1 a *copy* of the pipe's write end, so when `grep`
+writes to stdout it's really writing into the pipe. `dup2` atomically closes the
+old `newfd` first, then duplicates. This is the exact mechanism Stage 3 reuses
+for `>` and `<` — file redirection and pipes are the same idea pointed at
+different fds.
+
+**3. The closing discipline — the #1 pipe bug.**
+A pipe's read end reports EOF **only when every copy of the write end is
+closed**. `fork` duplicates all open fds, so after forking the children of a
+pipeline, the *parent* and several children may each hold a copy of the same
+write end. If even one stays open, the reader downstream blocks forever waiting
+for an EOF that never comes — the pipeline hangs. The rule the code follows:
+after `dup2`, close the original; and in the parent, close every pipe end the
+moment it's been handed off to a child. We close in both children and the parent,
+aggressively.
+
+**4. Why all stages run concurrently (not one-then-the-next).**
+A pipe's kernel buffer is small (often 64 KB). If the shell ran `producer` fully,
+then `consumer`, a producer emitting more than the buffer holds would block on a
+full pipe with nobody reading — deadlock. So every command in the pipeline is
+forked up front and runs at the same time; the kernel schedules them and applies
+back-pressure (a full pipe blocks the writer, an empty one blocks the reader)
+automatically.
+
+**5. SIGPIPE — graceful early exit (`yes | head`).**
+When a downstream command finishes early (`head -3` stops after 3 lines and
+closes its read end), the upstream `yes` keeps writing — into a pipe with no
+reader. The kernel sends it **SIGPIPE**, whose default action is to terminate the
+process. That's *correct*: `yes` dies, the pipeline ends, and the shell doesn't
+hang. We left the children's default SIGPIPE in place, so this just works. (The
+shell itself never writes to a pipe, so it's unaffected.)
+
+**6. Pipeline exit status = the last command.**
+`execute_pipeline` reaps all children but reports only the **last** command's
+status as `$?` — bash's convention. So `false | true` is success and `true |
+false` is failure. The other children are still `waitpid`'d so they don't become
+zombies.
+
+**7. `strtok_r` for two-level parsing.**
+Parsing is now two passes: split on `|`, then split each segment on whitespace.
+Plain `strtok` keeps its progress in one hidden global, so a tokenization nested
+inside another would corrupt it. `strtok_r` stores that state in a caller-owned
+`saveptr`, giving the outer (pipe) and inner (argument) passes independent
+bookmarks. A pipeline of length 1 falls out for free — no `|`, one segment, one
+command — so the executor needs only a single entry point.
+
+### Bugs & mistakes (and fixes)
+
+This stage compiled clean on the first try and ran leak-free — *because* the two
+classic traps were designed around up front. Worth recording the traps and the
+specific decisions that avoid them, since both are prime interview territory:
+
+**1. The pipe-hang trap (avoided by closing discipline).**
+The failure mode — a pipeline that hangs forever — comes from a single leaked
+write-end fd keeping EOF from ever firing. The defense is mechanical: every
+`dup2` is immediately followed by closing the original, and the parent closes
+each pipe end the instant it's been handed to a child. The `yes | head -3` test
+exists specifically to catch a regression here: if any fd leaked, that command
+would hang instead of printing 3 lines and stopping.
+
+**2. The `strtok` re-entrancy trap (avoided by `strtok_r`).**
+The intuitive way to write the two-level parse — outer `strtok` on `|`, calling a
+helper that also uses `strtok` on whitespace — silently breaks, because the inner
+loop overwrites the outer loop's hidden global cursor. Symptom would be commands
+after the first `|` getting mangled or dropped. Switching both passes to
+`strtok_r` (each with its own `saveptr`) removes the shared state entirely.
+
+**3. Known limitation, accepted for now: malformed pipes.**
+Because the `|` split uses `strtok_r` (which collapses consecutive delimiters and
+ignores leading/trailing ones), inputs like `ls | | grep` or `ls |` are handled
+*leniently* — the empty segment is skipped rather than reported as
+`syntax error near unexpected token '|'` the way bash does. Proper detection
+needs a hand-rolled scan that preserves empty fields. Documented as a deliberate
+Stage 2 simplification; a candidate for the Stage 7 polish pass.
+
+### Reading the output
+
+```
+mysh> ls src | grep .c
+executor.c
+main.c
+parser.c
+mysh> cat /etc/passwd | grep root | wc -l    ← three-stage pipeline
+       3
+mysh> echo hello world | tr a-z A-Z
+HELLO WORLD
+mysh> yes | head -3                          ← must NOT hang
+y
+y
+y
+mysh>
+```
+
+### Likely interview questions
+
+- *What does `pipe()` give you, and which end is which?* → two fds onto one
+  kernel buffer: `fds[0]` read, `fds[1]` write; bytes written to the write end
+  come out the read end.
+- *How do you connect one command's output to another's input?* → `dup2` the
+  pipe's write end onto the producer's stdout and the read end onto the
+  consumer's stdin, so the unchanged programs read/write the pipe via fd 0/1.
+- *What's the most common bug with pipes, and how do you prevent it?* → leaking a
+  pipe fd: the read end never sees EOF until all write-end copies are closed, so
+  the pipeline hangs. Close every end you don't use, in both children and parent,
+  right after `dup2`.
+- *Why must the parent close its copies of the pipe fds too?* → `fork` duplicated
+  them; if the parent keeps a write end open, the reader's EOF never fires even
+  though the producing child finished.
+- *Why run all commands at once instead of sequentially?* → the pipe buffer is
+  finite; a producer that outruns it blocks until a concurrent consumer drains
+  it. Running them serially would deadlock on the full buffer.
+- *What happens in `yes | head`? Why doesn't it hang?* → `head` exits and closes
+  the read end; `yes` then writes to a reader-less pipe, gets SIGPIPE, and is
+  terminated by the default handler. The pipeline ends cleanly.
+- *What exit status does a pipeline return?* → the last command's (bash
+  convention); the rest are still reaped to avoid zombies.
+- *Why `strtok_r` instead of `strtok` here?* → the parse is nested (split on `|`,
+  then on whitespace); `strtok`'s single hidden cursor can't support two
+  simultaneous tokenizations, but `strtok_r`'s per-call `saveptr` can.
+
+---
+
+*Stages 3–7 are documented here as they're built — one section each, same shape:
 what was built, key concepts, bugs & fixes, and interview Q&A.*

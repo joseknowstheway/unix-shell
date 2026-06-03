@@ -49,24 +49,27 @@ int main(void)
             break;
         }
 
-        /* 3. Parse. parse_command tokenizes `line` in place; the resulting
-         * pointers borrow from `line`, so `line` must stay alive through step 4
-         * (it does — we don't touch it again until the next loop iteration). */
-        command_t cmd;
-        if (parse_command(line, &cmd) == 0) {
+        /* 3. Parse. parse_pipeline splits `line` on '|' and tokenizes it in
+         * place; the resulting pointers borrow from `line`, so `line` must stay
+         * alive through step 4 (it does — we don't touch it again until the next
+         * loop iteration). */
+        pipeline_t pipeline;
+        if (parse_pipeline(line, &pipeline) == 0) {
             continue; /* blank line — just re-prompt */
         }
 
-        /* `exit` is handled inline here in Stage 1 so the loop has a clean way
-         * to terminate. In Stage 4 it moves into builtins.c alongside cd,
-         * history, and export, where it can honor an optional exit code. */
-        if (strcmp(cmd.args[0], "exit") == 0) {
+        /* `exit` is handled inline here so the loop has a clean way to
+         * terminate. Only a bare `exit` (a one-command pipeline) counts —
+         * `exit | cat` runs exit in a child and must NOT kill the shell. In
+         * Stage 4 this moves into builtins.c, where it can honor an exit code. */
+        if (pipeline.num_commands == 1 &&
+            strcmp(pipeline.commands[0].args[0], "exit") == 0) {
             break;
         }
 
         /* 4. Execute and loop. (The return status is ignored for now; a future
          * "$?" built-in will want it.) */
-        execute_command(&cmd);
+        execute_pipeline(&pipeline);
     }
 
     free(line);

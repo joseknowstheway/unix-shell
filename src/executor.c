@@ -1,79 +1,165 @@
 /*
- * executor.c — the fork/exec/wait core (Stage 1).
+ * executor.c — the fork/exec/wait core plus pipelines (Stages 1–2).
  *
- * Why three system calls instead of one? Because Unix deliberately splits
- * "make a new process" from "run a new program":
+ * Stage 1 recap — why three system calls instead of one:
  *
- *   fork()   duplicates the calling process. After it returns there are TWO
- *            processes executing the same code, distinguished only by fork's
- *            return value: 0 in the child, the child's PID in the parent.
+ *   fork()   duplicates the calling process; returns 0 in the child, the child's
+ *            PID in the parent. Now two processes run the same code.
+ *   execvp() throws away the caller's program image and loads a new one; it does
+ *            NOT return on success, so any code after it means exec failed.
+ *   waitpid() blocks the parent until a child terminates and reports how it died.
  *
- *   execvp() throws away the calling process's program image and loads a new
- *            one in its place. It does NOT return on success — there is nothing
- *            to return to, the old code is gone. So if the line after execvp
- *            runs at all, the exec failed (usually: command not found).
+ * Stage 2 — pipelines. A pipe is a one-way kernel buffer with two ends:
+ * pipe(fds) gives fds[0] (read) and fds[1] (write). Anything written to fds[1]
+ * comes out of fds[0]. To make "ls | grep" work we run both commands at once,
+ * point ls's stdout at a pipe's write end and grep's stdin at the same pipe's
+ * read end (via dup2), and let data flow.
  *
- *   waitpid() blocks the parent until a specific child terminates and reports
- *            how it died. Without it the shell would race ahead and print the
- *            next prompt before the command produced its output.
- *
- * The split is what makes a shell possible: the child customizes itself (later
- * stages will redirect its file descriptors here) in the window between fork and
- * exec, while the parent stays alive to keep running the shell.
+ * The make-or-break rule of pipes is FILE-DESCRIPTOR HYGIENE: every process that
+ * inherits a copy of a pipe end must close the ends it doesn't use. A pipe's
+ * read end only reports EOF once EVERY copy of the write end is closed. If the
+ * shell (or any child) leaves a write end open, the reader blocks forever and
+ * the pipeline hangs. So we close aggressively, in both children and parent.
  */
 
 #include "executor.h"
 
 #include <errno.h>     /* errno */
-#include <stdio.h>     /* perror, fprintf */
+#include <stdio.h>     /* fprintf */
 #include <stdlib.h>    /* exit, EXIT_FAILURE */
 #include <string.h>    /* strerror */
 #include <sys/wait.h>  /* waitpid, WIFEXITED, WEXITSTATUS, WIFSIGNALED */
-#include <unistd.h>    /* fork, execvp */
+#include <unistd.h>    /* fork, execvp, pipe, dup2, close */
+
+/*
+ * exec_child — replace the current (child) process with cmd's program.
+ *
+ * Shared by the single-command and pipeline paths. Called only in a child, only
+ * after any file descriptors have already been rewired. Never returns: on
+ * success the image is replaced; on failure it reports and exits, so a failed
+ * child can never fall back into the shell's REPL and become a second shell.
+ */
+static void exec_child(const command_t *cmd)
+{
+    execvp(cmd->args[0], cmd->args);
+
+    /* Reached only if execvp failed. We print the command name ourselves (plain
+     * perror couldn't) so it reads like a real shell. */
+    fprintf(stderr, "mysh: %s: %s\n", cmd->args[0], strerror(errno));
+    exit(EXIT_FAILURE);
+}
+
+/*
+ * status_to_code — translate waitpid's packed status word into a conventional
+ * shell exit code: the program's own code on a normal exit, or 128 + signal
+ * number if a signal killed it (so Ctrl+C -> SIGINT(2) -> 130).
+ */
+static int status_to_code(int status)
+{
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return 0;
+}
 
 int execute_command(const command_t *cmd)
 {
     pid_t pid = fork();
 
     if (pid < 0) {
-        /* fork failed — out of process slots or memory. The shell survives;
-         * report and bail without running anything. */
         perror("mysh: fork");
         return -1;
     }
 
     if (pid == 0) {
-        /* ── CHILD ──
-         * Replace this process image with the requested program. execvp searches
-         * each directory in $PATH for args[0], which is why "ls" works without a
-         * full "/bin/ls" path. The args array is already NULL-terminated by the
-         * parser, exactly as execvp requires. */
-        execvp(cmd->args[0], cmd->args);
-
-        /* Only reached if execvp failed — the program image was never replaced.
-         * We print the command name ourselves (perror alone couldn't) so the
-         * message reads like a real shell: "mysh: foo: No such file or
-         * directory". The failed child must exit here; if it fell through it
-         * would re-enter the shell's REPL loop and run as a second shell. */
-        fprintf(stderr, "mysh: %s: %s\n", cmd->args[0], strerror(errno));
-        exit(EXIT_FAILURE);
+        /* ── CHILD ── no fds to rewire for a lone command; just exec. */
+        exec_child(cmd);
     }
 
-    /* ── PARENT ──
-     * Block until THIS child finishes. We pass the specific pid (not -1) so we
-     * wait for the command we just launched and nothing else. */
+    /* ── PARENT ── wait for exactly this child. */
     int status;
     if (waitpid(pid, &status, 0) < 0) {
         perror("mysh: waitpid");
         return -1;
     }
+    return status_to_code(status);
+}
 
-    /* Translate the raw status word into a conventional exit code. */
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);        /* normal exit: the code it passed */
+int execute_pipeline(const pipeline_t *pipeline)
+{
+    int n = pipeline->num_commands;
+
+    /* A pipeline of one is just a normal command — reuse the simple path. */
+    if (n == 1) {
+        return execute_command(&pipeline->commands[0]);
     }
-    if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);     /* killed by signal N -> 128 + N */
+
+    /* prev_read holds the read end of the PREVIOUS command's output pipe, which
+     * becomes the CURRENT command's stdin. -1 means "no upstream" (first cmd). */
+    int   prev_read = -1;
+    pid_t pids[MAX_COMMANDS];
+
+    for (int i = 0; i < n; i++) {
+        int is_last = (i == n - 1);
+
+        /* Every command except the last needs a fresh pipe to feed the next. */
+        int pipefd[2] = { -1, -1 };
+        if (!is_last && pipe(pipefd) < 0) {
+            perror("mysh: pipe");
+            return -1;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("mysh: fork");
+            return -1;
+        }
+
+        if (pid == 0) {
+            /* ── CHILD i ──
+             * Wire stdin to the upstream pipe (if any), stdout to our own output
+             * pipe (if we're not last), then close every raw pipe fd we still
+             * hold: once dup2 has copied an fd onto STDIN/STDOUT, the original
+             * number is redundant, and leaving it open would keep a pipe end
+             * alive and stall EOF downstream. */
+            if (prev_read != -1) {
+                dup2(prev_read, STDIN_FILENO);
+                close(prev_read);
+            }
+            if (!is_last) {
+                close(pipefd[0]);              /* we don't read our own output */
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[1]);
+            }
+            exec_child(&pipeline->commands[i]);
+        }
+
+        /* ── PARENT ──
+         * The child now owns whatever copies it needs. The parent must drop its
+         * own copies immediately, or those open fds would hold pipe ends open
+         * and prevent the readers downstream from ever seeing EOF. */
+        pids[i] = pid;
+        if (prev_read != -1) {
+            close(prev_read);                  /* fully handed off to child i */
+        }
+        if (!is_last) {
+            close(pipefd[1]);                  /* parent never writes */
+            prev_read = pipefd[0];             /* hand read end to child i+1 */
+        }
     }
-    return 0;
+
+    /* Reap every child. We keep the LAST command's status as the pipeline's
+     * result (bash's convention for "$?"); the rest are reaped so they don't
+     * linger as zombies. */
+    int status = 0;
+    for (int i = 0; i < n; i++) {
+        int s;
+        if (waitpid(pids[i], &s, 0) > 0 && i == n - 1) {
+            status = status_to_code(s);
+        }
+    }
+    return status;
 }

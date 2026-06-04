@@ -43,7 +43,9 @@ typedef struct {
     char *input_file;     /* "< file" target; NULL if no input redirection */
     char *output_file;    /* "> "/">>" file target; NULL if no output redirection */
     int   append_mode;    /* 1 if ">>", 0 if ">" */
-    int   background;     /* 1 if command ended in "&"; unused until Stage 5 */
+    int   background;     /* 1 if command ended in "&" (Stage 5) */
+    char *heredoc_delim;  /* "<< WORD" delimiter; NULL if no here-doc (Stage 7) */
+    int   heredoc_fd;     /* fd of the collected here-doc body, or -1 (Stage 7) */
 } command_t;
 
 /*

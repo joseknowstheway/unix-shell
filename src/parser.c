@@ -34,8 +34,10 @@
 int parse_command(char *segment, command_t *cmd)
 {
     /* Start from a clean slate so stale pointers from a previous command can
-     * never leak through into this one. */
+     * never leak through into this one. heredoc_fd needs an explicit -1 since
+     * memset's 0 is a real fd (stdin). */
     memset(cmd, 0, sizeof(*cmd));
+    cmd->heredoc_fd = -1;
 
     /* strtok_r's bookmark lives here on our stack, not in a global. */
     char *saveptr = NULL;
@@ -51,6 +53,20 @@ int parse_command(char *segment, command_t *cmd)
          * ("sleep 5 &", not "sleep 5&"). */
         if (strcmp(token, "&") == 0) {
             cmd->background = 1;
+            token = strtok_r(NULL, TOKEN_DELIMITERS, &saveptr);
+            continue;
+        }
+
+        /* "<< WORD" — here-document. The next token is the delimiter word; the
+         * body is read from stdin later (heredoc.c), not from this line. */
+        if (strcmp(token, "<<") == 0) {
+            char *delim = strtok_r(NULL, TOKEN_DELIMITERS, &saveptr);
+            if (delim == NULL) {
+                fprintf(stderr,
+                        "mysh: syntax error: expected delimiter after '<<'\n");
+                return -1;
+            }
+            cmd->heredoc_delim = delim;
             token = strtok_r(NULL, TOKEN_DELIMITERS, &saveptr);
             continue;
         }

@@ -20,6 +20,8 @@
 #include "executor.h"
 #include "builtins.h"
 #include "signals.h"
+#include "expand.h"
+#include "heredoc.h"
 #include "shell.h"
 
 #include <signal.h> /* sigset_t */
@@ -84,17 +86,27 @@ int main(void)
             continue;
         }
 
-        /* 4. Execute.
-         * A built-in given as a single, standalone command runs in THIS process
-         * so it can change our directory/environment/etc. Anything with a pipe
-         * goes to the executor, which runs each stage (built-in or not) in a
-         * forked child. */
-        if (pipeline.num_commands == 1 &&
-            is_builtin(pipeline.commands[0].args[0])) {
-            state.last_status = run_builtin(&pipeline.commands[0], &state);
-        } else {
-            state.last_status = execute_pipeline(&pipeline, &state);
+        /* 3a. Collect any here-doc bodies (reads more lines from stdin), then
+         * expand $VAR / $? and globs across the pipeline. After expansion the
+         * args are heap-owned, so free_expansions must run before the next loop. */
+        if (collect_heredocs(&pipeline, &state) == 0) {
+            expand_pipeline(&pipeline, &state);
+
+            /* 4. Execute.
+             * A built-in given as a single, standalone command runs in THIS
+             * process so it can change our directory/environment/etc. Anything
+             * with a pipe goes to the executor, which runs each stage (built-in
+             * or not) in a forked child. */
+            if (pipeline.num_commands == 1 &&
+                is_builtin(pipeline.commands[0].args[0])) {
+                state.last_status = run_builtin(&pipeline.commands[0], &state);
+            } else {
+                state.last_status = execute_pipeline(&pipeline, &state);
+            }
+
+            free_expansions(&pipeline);
         }
+        close_heredocs(&pipeline); /* close fds even if a temp file failed */
 
         /* The `exit` built-in sets this instead of calling exit() directly, so
          * we can fall out of the loop and free everything cleanly. */

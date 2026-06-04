@@ -19,7 +19,7 @@
 - [Stage 4 — Built-in Commands](#stage-4--built-in-commands)
 - [Stage 5 — Background Processes](#stage-5--background-processes)
 - [Stage 6 — Signal Handling & Job Control](#stage-6--signal-handling--job-control)
-- [Stage 7 — Polish & Presentation](#stage-7--polish--presentation) *(upcoming)*
+- [Stage 7 — Polish, Presentation & Stretch Goals](#stage-7--polish-presentation--stretch-goals)
 
 ---
 
@@ -903,5 +903,120 @@ mysh> kill %2               ← SIGTERM to the whole group
 
 ---
 
-*Stage 7 is documented here as it's built — same shape: what was built, key
-concepts, bugs & fixes, and interview Q&A.*
+## Stage 7 — Polish, Presentation & Stretch Goals
+
+**Files:** `expand.c`, `expand.h`, `heredoc.c`, `heredoc.h`, `README.md`,
+`DEMO.md` (+ `parser`, `executor`, `main` wiring)
+**Goal:** make the repo something a Cisco engineer wants to read (README,
+syscall table, recorded demo), confirm the quality bar, and add three stretch
+features that make the shell feel real: **variable expansion**, **globbing**, and
+**here-documents**.
+
+### Key concepts
+
+**1. Word expansion is a phase between parsing and execution.**
+A real shell doesn't hand your raw tokens to the program — it rewrites them
+first. `expand_pipeline` runs after parsing and before exec, doing two
+substitutions in the canonical order: variables first (`$VAR`, `${VAR}`, `$?`),
+then pathname globbing (`*`, `?`, `[..]`). That ordering is why a word built from
+`$DIR` and a `*` pattern expands the variable *then* globs the result.
+
+**2. Variable expansion: a small scanner.**
+`expand_variables` walks the word; on `$` it reads a name (`[A-Za-z_][A-Za-z0-9_]*`
+or `${...}`) and substitutes `getenv(name)`, or the last exit status for `$?`. An
+undefined variable becomes the empty string, like bash. This is also the honest
+answer to a Stage 4 loose end: `export` always worked, but `echo $VAR` only shows
+it now that expansion exists.
+
+**3. Globbing with `glob(3)` and `GLOB_NOCHECK`.**
+Rather than hand-rolling a matcher, `expand_pipeline` calls POSIX `glob()` on any
+word containing a metacharacter. `GLOB_NOCHECK` makes an unmatched pattern come
+back as the literal pattern — exactly bash's default (so `ls *.zzz` with no match
+runs `ls *.zzz` and lets `ls` report the error). One word can expand to many, so
+the argument list is rebuilt.
+
+**4. The memory-model shift: borrowed → owned.**
+Through Stage 6, every `args[i]` pointed INTO the input line (no allocation). An
+expanded word can be longer than the original or split into several words, so
+that borrow no longer works. After `expand_pipeline`, every arg and redirection
+target is a heap-allocated string the pipeline OWNS, freed by `free_expansions`
+once the command has run. The REPL now does: parse → collect here-docs → expand →
+execute → free_expansions → close here-docs.
+
+**5. Here-documents: stdin from inline text.**
+`cmd << WORD` feeds the following lines (until a line equal to `WORD`) to `cmd` as
+stdin. The shell reads that body from its own input right after the command line
+(`heredoc.c`), writes it to a temp file, `unlink`s the file immediately (so it
+disappears when closed) and marks it close-on-exec, then `apply_redirection`
+`dup2`s that fd onto stdin — the same fd-redirection mechanism as `<`, just
+pointed at a temp file the shell filled in.
+
+**6. Presentation is part of the engineering.**
+The README leads with what the project is and what it taught, lists features,
+gives a two-command build, shows usage, and — the piece interviewers actually
+scan — a **system-call → why-it-matters table**. `DEMO.md` scripts an asciinema
+recording (job control needs a real terminal, so it can't be auto-captured).
+
+### Bugs & mistakes (and fixes)
+
+**1. `/*` inside a block comment (`-Wcomment`, fixed twice).** A comment that
+literally wrote a `$DIR` + `*.c` example contained the `/` `*` sequence, which
+the compiler reads as a nested comment opener and warns about. First reword still
+had a slash before the star; the fix was to phrase the example without ever
+putting `/` immediately before `*`. A good reminder that the zero-warning bar
+includes comments.
+
+**2. A here-doc fd of 0 would alias stdin.** `command_t` is `memset` to zero at
+parse, but `heredoc_fd == 0` is a real descriptor (stdin). If left at 0,
+`apply_redirection` would think every command had a here-doc on fd 0. Fixed by
+explicitly setting `heredoc_fd = -1` after the memset in `parse_command`.
+
+**3. An accidentally committed `out.txt`.** A redirection test artifact got swept
+into an earlier `git add -A` and committed. Caught it during the Stage 7 cleanup
+(`git status` showed it tracked) and removed it. Lesson: glance at `git status`
+before `add -A`.
+
+**4. Memory discipline for the new owned strings.** Introducing heap-owned args
+risked leaks (verified zero) or double-frees. The rule that keeps it safe:
+`free_expansions` runs on every path that ran `expand_pipeline` — including before
+`exit` breaks the loop — so nothing is leaked and nothing is freed twice.
+
+### Known limitations (documented, not hidden)
+
+- Operators must be space-separated (`ls > out`, `sleep 5 &`).
+- No quoting, so expansions aren't word-split and quotes aren't special.
+- Here-doc bodies are literal (no `$VAR` expansion inside them).
+- A killed background job prints `Done` rather than `Terminated`.
+
+### The quality bar (final pass)
+
+- Warning-free `-Wall -Wextra` build (including comments).
+- **Zero leaks** via `make leaks` across pipelines, jobs, expansion, here-docs.
+- Clean under UndefinedBehaviorSanitizer, including the PTY job-control paths.
+- Every function carries a purpose comment; constants are named
+  (`MAX_ARGS`, `MAX_JOBS`, `HISTORY_CAPACITY`, …); system calls are
+  error-checked.
+
+### Likely interview questions
+
+- *When does the shell expand `$VAR` and `*` — before or after parsing?* → after
+  tokenizing, in a dedicated expansion phase; variables first, then globbing.
+- *Why did `echo $VAR` not work before this stage even though `export` did?* →
+  `export` set the environment, but without an expansion phase the parser passed
+  `$VAR` through literally; expansion is what substitutes it.
+- *How do you implement wildcards?* → POSIX `glob()`; `GLOB_NOCHECK` reproduces
+  bash's "unmatched pattern stays literal" default; one word can yield many args.
+- *How does a here-document get into a command's stdin?* → read the body up to the
+  delimiter, stash it (here, an unlinked temp file), and `dup2` its fd onto stdin
+  — the same redirection mechanism as `<`.
+- *What changed about memory ownership when you added expansion?* → args stopped
+  borrowing from the input line and became heap-allocated/owned, freed after each
+  command, because an expanded word can grow or split.
+- *How do you keep `$?` accurate?* → the shell records each command's exit status
+  in `shell_state`, and `$?` expands to it.
+
+---
+
+*All seven stages complete. This document is the full concept record; the
+[`README.md`](README.md) is the front door, and [`DEMO.md`](DEMO.md) scripts the
+recording.*

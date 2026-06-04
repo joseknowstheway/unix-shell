@@ -49,7 +49,12 @@
  */
 static void apply_redirection(const command_t *cmd)
 {
-    if (cmd->input_file != NULL) {
+    if (cmd->heredoc_fd >= 0) {
+        /* A here-doc already holds the body in a temp file; just point stdin at
+         * it. Takes precedence over "< file" if both were given. */
+        dup2(cmd->heredoc_fd, STDIN_FILENO);
+        close(cmd->heredoc_fd);
+    } else if (cmd->input_file != NULL) {
         int fd = open(cmd->input_file, O_RDONLY);
         if (fd < 0) {
             fprintf(stderr, "mysh: %s: %s\n", cmd->input_file, strerror(errno));

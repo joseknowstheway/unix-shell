@@ -86,4 +86,11 @@ void jobs_print(const jobs_table_t *table);
  */
 void jobs_notify_completed(jobs_table_t *table);
 
+/*
+ * jobs_clear_done — free every finished slot WITHOUT printing. The `jobs`
+ * built-in calls this after listing, so a Done job it already displayed isn't
+ * reported a second time by the next prompt's jobs_notify_completed.
+ */
+void jobs_clear_done(jobs_table_t *table);
+
 #endif /* JOBS_H */

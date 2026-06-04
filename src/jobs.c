@@ -119,3 +119,12 @@ void jobs_notify_completed(jobs_table_t *table)
         }
     }
 }
+
+void jobs_clear_done(jobs_table_t *table)
+{
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (table->jobs[i].in_use && table->jobs[i].state == JOB_DONE) {
+            table->jobs[i].in_use = 0;
+        }
+    }
+}

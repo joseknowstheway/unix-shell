@@ -89,6 +89,9 @@ static int builtin_jobs(shell_state_t *state)
     sigset_t prev;
     block_sigchld(&prev);
     jobs_print(&state->jobs);
+    /* Drop finished jobs we just listed, so the next prompt's notifier doesn't
+     * report the same "Done" line again (matches bash, which clears on list). */
+    jobs_clear_done(&state->jobs);
     unblock_sigchld(&prev);
     return 0;
 }

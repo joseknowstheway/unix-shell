@@ -152,7 +152,11 @@ processes together.
 A deeper, stage-by-stage explanation of every concept (the fork/exec split, pipe
 fd hygiene, why built-ins can't be forked, zombie reaping, async-signal-safety,
 process groups, and more) lives in
-[`concept_walkthrough.md`](concept_walkthrough.md).
+[`concept_walkthrough.md`](concept_walkthrough.md) — or, for a nicer read, the
+aesthetic, interactive HTML version at
+[`concept_walkthrough.html`](concept_walkthrough.html) (a styled, self-contained
+page with a navigation sidebar, reading-progress bar, and click-to-reveal
+interview questions; open it in a browser, or serve it via GitHub Pages).
 
 ---
 

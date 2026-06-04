@@ -11,6 +11,13 @@
 
 ---
 
+> **Prefer a nicer read?** An aesthetic, interactive HTML version of this
+> document is available at [`concept_walkthrough.html`](concept_walkthrough.html)
+> (open it in a browser) — sidebar navigation, a reading-progress bar, and
+> click-to-reveal interview questions.
+
+---
+
 ## Table of Contents
 
 - [Stage 1 — The Read-Eval Loop](#stage-1--the-read-eval-loop)

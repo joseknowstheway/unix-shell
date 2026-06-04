@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Concept Walkthrough — Unix Shell (mysh)</title>
+<style>
+  :root{
+    --bg:#0b0f17; --bg2:#0e1422; --surface:#141b2d; --surface2:#1a2336;
+    --border:#26314b; --text:#dce3f0; --muted:#90a0bd; --faint:#6b7a9c;
+    --accent:#46d8c5; --accent2:#7aa2ff; --amber:#f2b65a; --green:#5ad19a;
+    --rose:#f2728a;
+    --code-bg:#080c14; --code-border:#1e2740; --radius:14px;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 80% -10%,#16203a 0%,var(--bg) 55%) fixed;
+    color:var(--text); font-family:var(--sans); line-height:1.7; font-size:16.5px;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent2); text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{
+    font-family:var(--mono); font-size:.86em; background:#0c1322; color:#9fe7dd;
+    border:1px solid var(--code-border); border-radius:6px; padding:.08em .42em;
+  }
+  /* progress bar */
+  #progress{position:fixed; top:0; left:0; height:3px; width:0;
+    background:linear-gradient(90deg,var(--accent),var(--accent2)); z-index:50;
+    box-shadow:0 0 10px rgba(70,216,197,.6)}
+  /* layout */
+  .wrap{max-width:1180px; margin:0 auto; display:grid;
+    grid-template-columns:248px minmax(0,1fr); gap:40px; padding:0 28px}
+  /* sidebar */
+  aside{position:sticky; top:0; align-self:start; height:100vh; padding:28px 0;
+    overflow-y:auto}
+  .nav-title{font-size:.72rem; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--faint); margin:0 0 12px 12px}
+  nav a{display:block; color:var(--muted); padding:7px 12px; border-left:2px solid transparent;
+    font-size:.92rem; border-radius:0 8px 8px 0; transition:all .15s}
+  nav a:hover{color:var(--text); background:var(--surface); text-decoration:none}
+  nav a.active{color:var(--accent); border-left-color:var(--accent);
+    background:linear-gradient(90deg,rgba(70,216,197,.10),transparent)}
+  nav a .n{color:var(--faint); font-family:var(--mono); font-size:.78rem; margin-right:8px}
+  nav a.active .n{color:var(--accent)}
+  /* main */
+  main{padding:48px 0 120px; min-width:0}
+  .hero{margin-bottom:54px}
+  .kicker{display:inline-block; font-family:var(--mono); font-size:.74rem; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--accent); border:1px solid var(--border);
+    background:var(--surface); padding:5px 12px; border-radius:999px; margin-bottom:20px}
+  h1{font-size:2.5rem; line-height:1.15; margin:.1em 0 .35em; letter-spacing:-.01em}
+  h1 .sub{display:block; font-size:1.15rem; font-weight:500; color:var(--muted); margin-top:.5em; letter-spacing:0}
+  .lede{color:var(--muted); font-size:1.05rem; max-width:64ch}
+  .lede em{color:var(--accent); font-style:normal}
+  .hint{margin-top:22px; font-size:.9rem; color:var(--faint); border-top:1px dashed var(--border); padding-top:16px}
+  /* stage section */
+  section{scroll-margin-top:20px; margin-bottom:30px}
+  .stage{background:linear-gradient(180deg,var(--surface) 0%,var(--bg2) 100%);
+    border:1px solid var(--border); border-radius:var(--radius); padding:30px 32px 34px;
+    margin-bottom:34px; box-shadow:0 18px 40px -28px rgba(0,0,0,.8)}
+  .stage-head{display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:6px}
+  .badge{font-family:var(--mono); font-size:.74rem; font-weight:600; letter-spacing:.06em;
+    color:#04232a; background:linear-gradient(120deg,var(--accent),#63e6d6);
+    padding:5px 11px; border-radius:8px; white-space:nowrap}
+  .badge.field{background:linear-gradient(120deg,var(--amber),#f7cf86); color:#3a2606}
+  h2{font-size:1.55rem; margin:0; letter-spacing:-.01em}
+  .meta{color:var(--muted); font-size:.92rem; margin:14px 0 0}
+  .goal{margin:14px 0 24px; padding:13px 16px; border-left:3px solid var(--accent2);
+    background:rgba(122,162,255,.07); border-radius:0 10px 10px 0; color:#cdd8f2}
+  .label{display:flex; align-items:center; gap:10px; font-size:.78rem; letter-spacing:.13em;
+    text-transform:uppercase; color:var(--faint); margin:28px 0 14px}
+  .label::after{content:""; flex:1; height:1px; background:var(--border)}
+  .label.bug{color:#f0a6b4}
+  .lead-note{color:var(--muted); margin:0 0 14px}
+  /* concepts */
+  ol.concepts, ol.bugs{list-style:none; margin:0; padding:0}
+  ol.concepts{counter-reset:c}
+  ol.bugs{counter-reset:b}
+  ol.concepts>li, ol.bugs>li{position:relative; padding:2px 0 2px 46px; margin-bottom:20px}
+  ol.concepts>li{counter-increment:c}
+  ol.bugs>li{counter-increment:b}
+  ol.concepts>li::before{content:counter(c); color:var(--accent); border:1px solid var(--border)}
+  ol.bugs>li::before{content:counter(b); color:var(--rose); border:1px solid rgba(242,114,138,.38)}
+  ol.concepts>li::before, ol.bugs>li::before{position:absolute; left:0; top:1px;
+    width:30px; height:30px; display:grid; place-items:center; font-family:var(--mono);
+    font-size:.85rem; font-weight:600; background:var(--surface2); border-radius:9px}
+  ol.concepts h4, ol.bugs h4{margin:3px 0 6px; font-size:1.02rem; color:#fff}
+  ol.concepts p, ol.bugs p{margin:.3em 0; color:var(--text)}
+  ul.sub{margin:.5em 0; padding-left:1.1em}
+  ul.sub li{margin:.3em 0; color:var(--muted)}
+  ul.sub strong{color:var(--text)}
+  .note-list{padding-left:1.2em}
+  .note-list li{margin:.55em 0; color:var(--muted)}
+  .note-list strong{color:#fff}
+  /* terminal code */
+  pre{margin:16px 0; background:var(--code-bg); border:1px solid var(--code-border);
+    border-radius:11px; overflow-x:auto; font-family:var(--mono); font-size:.84rem;
+    line-height:1.6}
+  pre .bar{display:flex; gap:7px; padding:10px 14px; border-bottom:1px solid var(--code-border)}
+  pre .bar i{width:11px; height:11px; border-radius:50%; display:inline-block}
+  pre .bar i:nth-child(1){background:#ff5f57} pre .bar i:nth-child(2){background:#febc2e}
+  pre .bar i:nth-child(3){background:#28c840}
+  pre code{display:block; background:none; border:none; padding:16px; color:#c8d4e8; white-space:pre}
+  pre code .c{color:#5f7088}      /* comment / annotation */
+  pre code .p{color:var(--accent)}/* prompt */
+  pre code .o{color:var(--amber)} /* program output highlight */
+  /* interview accordions */
+  .interview details{border:1px solid var(--border); border-radius:11px; margin:10px 0;
+    background:var(--surface2); overflow:hidden}
+  .interview details[open]{border-color:rgba(242,182,90,.45)}
+  .interview summary{cursor:pointer; padding:14px 18px 14px 48px; position:relative;
+    font-weight:500; color:#eef2fb; list-style:none}
+  .interview summary::-webkit-details-marker{display:none}
+  .interview summary::before{content:"Q"; position:absolute; left:16px; top:50%;
+    transform:translateY(-50%); width:22px; height:22px; display:grid; place-items:center;
+    font-family:var(--mono); font-size:.74rem; font-weight:700; color:#3a2606;
+    background:var(--amber); border-radius:6px}
+  .interview summary::after{content:"+"; position:absolute; right:18px; top:50%;
+    transform:translateY(-50%); color:var(--faint); font-size:1.2rem; font-family:var(--mono)}
+  .interview details[open] summary::after{content:"\2212"}
+  .interview .ans{padding:0 18px 16px 48px; color:var(--muted)}
+  .interview .ans::before{content:"A"; float:left; margin-left:-32px; width:22px; height:22px;
+    display:grid; place-items:center; font-family:var(--mono); font-size:.74rem; font-weight:700;
+    color:#04232a; background:var(--green); border-radius:6px}
+  .quiz-hint{font-size:.85rem; color:var(--faint); margin:0 0 14px; font-style:italic}
+  /* callouts */
+  .callout{border:1px solid var(--border); border-left:3px solid var(--amber);
+    background:rgba(242,182,90,.06); border-radius:0 11px 11px 0; padding:14px 18px; margin:18px 0; color:#e7d9bf}
+  .callout.core{border-left-color:var(--accent); background:rgba(70,216,197,.07); color:#cdeee8}
+  footer{border-top:1px solid var(--border); margin-top:30px; padding-top:24px; color:var(--faint); font-size:.9rem}
+  footer a{color:var(--muted)}
+  .totop{position:fixed; right:22px; bottom:22px; width:44px; height:44px; border-radius:12px;
+    background:var(--surface); border:1px solid var(--border); color:var(--accent); display:grid;
+    place-items:center; font-size:1.1rem; opacity:0; pointer-events:none; transition:opacity .25s; z-index:40}
+  .totop.show{opacity:1; pointer-events:auto}
+  .totop:hover{background:var(--surface2); text-decoration:none}
+  @media (max-width:880px){
+    .wrap{grid-template-columns:1fr; gap:0}
+    aside{position:static; height:auto; padding:18px 0 0}
+    nav{display:flex; flex-wrap:wrap; gap:4px}
+    nav a{border-left:none; border:1px solid var(--border); border-radius:999px; padding:6px 12px; font-size:.82rem}
+    nav a.active{border-color:var(--accent)}
+    nav a .n{display:none}
+    main{padding-top:24px}
+    h1{font-size:2rem}
+    .stage{padding:24px 18px}
+    ol.concepts>li, ol.bugs>li{padding-left:40px}
+  }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div class="wrap">
+
+  <aside>
+    <p class="nav-title">Walkthrough</p>
+    <nav id="toc">
+      <a href="#top"><span class="n">··</span>Overview</a>
+      <a href="#stage-1"><span class="n">01</span>Read-Eval Loop</a>
+      <a href="#stage-2"><span class="n">02</span>Pipes</a>
+      <a href="#stage-3"><span class="n">03</span>I/O Redirection</a>
+      <a href="#stage-4"><span class="n">04</span>Built-in Commands</a>
+      <a href="#stage-5"><span class="n">05</span>Background Jobs</a>
+      <a href="#stage-6"><span class="n">06</span>Job Control</a>
+      <a href="#stage-7"><span class="n">07</span>Polish &amp; Stretch</a>
+    </nav>
+  </aside>
+
+  <main id="top">
+    <header class="hero">
+      <span class="kicker">Unix Shell · Concept Walkthrough</span>
+      <h1>From a prompt to a working shell
+        <span class="sub">The operating-systems &amp; C concepts behind every stage of the build.</span>
+      </h1>
+      <p class="lede">A running log of the concepts behind each stage — written so I can
+        <em>explain every line</em> in an interview, not just ship code. Each stage lists what
+        was built, the key ideas, any bugs/mistakes made along the way (and their fixes), and
+        the questions a Cisco-style interviewer is likely to ask (with answers).</p>
+      <p class="hint">Code lives in <code>src/</code>; the original spec is
+        <code>unix_shell_project.md</code>. Prefer plain text? See
+        <a href="concept_walkthrough.md">concept_walkthrough.md</a>.
+        Tip: the interview questions are collapsible — try answering before you reveal.</p>
+    </header>
+
+    <!-- STAGE 1 -->
+    <section id="stage-1" class="stage">
+      <div class="stage-head"><span class="badge">Stage 01</span><h2>The Read-Eval Loop</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>main.c</code>, <code>parser.c</code>, <code>parser.h</code>, <code>executor.c</code>, <code>executor.h</code>, <code>Makefile</code></p>
+      <p class="goal"><strong>Goal:</strong> a shell that runs single commands — type <code>ls -la</code>, it runs <code>ls -la</code>; type <code>pwd</code>, it runs <code>pwd</code>. No pipes, no redirection yet — just the core engine and the loop everything else hangs off.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>The REPL — five steps, forever</h4><p>Every shell, from this one to bash, is the same loop: print a prompt → read a line → parse it → execute it → repeat. <code>main.c</code> is literally that loop. Stages 2–6 don't change its shape; they each make one of those steps smarter (parse learns pipes, execute learns redirection, etc.). Seeing the whole project as "five steps and I'm extending one of them" is the mental model.</p></li>
+        <li><h4>Why a shell needs <code>fork()</code> <em>and</em> <code>execvp()</code> — the two-call split</h4>
+          <p>Unix deliberately separates "create a new process" from "run a new program":</p>
+          <ul class="sub">
+            <li><strong><code>fork()</code></strong> clones the calling process. After it returns there are <strong>two</strong> processes executing the same code, distinguished only by the return value: <code>0</code> in the child, the child's PID in the parent, <code>-1</code> on failure.</li>
+            <li><strong><code>execvp()</code></strong> discards the current process's program image and loads a new one in its place. On success it <strong>does not return</strong> — there's nothing to return to, the old code is gone.</li>
+          </ul>
+          <p>If the shell called <code>execvp()</code> directly (no fork), the shell <em>itself</em> would be replaced by <code>ls</code> and never come back. Forking first means the <strong>child</strong> gets replaced while the <strong>parent</strong> stays alive to keep being the shell. The window between <code>fork</code> and <code>exec</code> is also where Stages 2–3 rewire the child's file descriptors for pipes and redirection — so this split is what makes everything later possible.</p></li>
+        <li><h4><code>execvp</code> vs <code>execv</code> — the <code>p</code> is <code>$PATH</code></h4><p><code>execvp("ls", ...)</code> searches each directory in <code>$PATH</code> for <code>ls</code>, which is why we can type <code>ls</code> and not <code>/bin/ls</code>. The plain <code>execv</code> needs a full path. The <code>v</code> means "vector" — arguments come as an array (<code>char *argv[]</code>), which must be <strong>NULL-terminated</strong> so exec knows where the list ends. That NULL is why the parser reserves <code>args[argc] = NULL</code>.</p></li>
+        <li><h4><code>waitpid()</code> — why the parent blocks</h4><p>After forking, the parent calls <code>waitpid(pid, &amp;status, 0)</code> to block until that specific child exits. Without it, the shell would print the next prompt and read the next line <em>while the command was still running</em> — output would interleave with the prompt. Passing the specific <code>pid</code> (not <code>-1</code>) means "wait for the command I just launched," which matters once Stage 5 adds background jobs we deliberately <em>don't</em> wait on.</p></li>
+        <li><h4>Decoding the status word — <code>WIFEXITED</code> / <code>WEXITSTATUS</code> / <code>WTERMSIG</code></h4><p><code>waitpid</code> fills an <code>int status</code> that is <strong>not</strong> a plain exit code — it's a packed word. You interrogate it with macros: <code>WIFEXITED(status)</code> is true for a normal exit, and then <code>WEXITSTATUS(status)</code> is the 0–255 code the program returned; <code>WIFSIGNALED(status)</code> is true if a signal killed it, and <code>WTERMSIG(status)</code> is which one. The shell convention reports a signal death as <strong>128 + signal number</strong> — that's why <code>$?</code> is 130 after Ctrl+C (128 + SIGINT=2). This status is returned now so a future <code>$?</code> built-in can use it.</p></li>
+        <li><h4>Parsing in place with <code>strtok</code> — and who owns the strings</h4><p><code>parse_command</code> tokenizes the input line with <code>strtok</code>, which splits on whitespace by <strong>overwriting each delimiter with <code>\0</code></strong> and returning pointers <em>into the original buffer</em>. That's efficient (no per-token allocation) but creates an ownership rule: the <code>args[]</code> pointers <strong>borrow</strong> from the caller's line buffer, so that buffer must stay alive as long as the <code>command_t</code> is used, and must be writable. <code>main.c</code> respects this — it doesn't touch <code>line</code> again until the next loop iteration, after execution is done.</p></li>
+        <li><h4>The fixed-size <code>command_t</code> with fields for later stages</h4><p>The struct already has <code>input_file</code>, <code>output_file</code>, <code>append_mode</code>, and <code>background</code> even though Stage 1 never sets them. Declaring them now means the executor's data shape never changes as redirection (Stage 3) and background jobs (Stage 5) land — only the code that <em>fills</em> them grows. It's also a fixed-size, stack-allocated struct (<code>MAX_ARGS</code> cap), so the hot path does zero <code>malloc</code>.</p></li>
+        <li><h4><code>getline()</code> over <code>gets</code>/fixed buffers — and EOF</h4><p><code>getline(&amp;line, &amp;cap, stdin)</code> grows its buffer as needed (no overflow risk, unlike <code>gets</code>) and reuses the same allocation across iterations. It returns <code>-1</code> at end-of-file — which is what <strong>Ctrl+D on an empty line</strong> produces — so that's how an interactive shell cleanly exits. We print a newline and break. The single <code>free(line)</code> at the end is why <code>make leaks</code> reports zero leaks.</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <ol class="bugs">
+        <li><h4>AddressSanitizer hung the machine at startup (the big one)</h4><p>The natural debug build is <code>-fsanitize=address</code>. On this Mac it <strong>hung at ~100% CPU producing zero output</strong> — not even the first <code>mysh&gt;</code> prompt — and left <em>runaway processes</em> spinning (found via <code>ps</code>, three copies pegging the CPU).</p>
+          <ul class="sub">
+            <li><strong>Diagnosis:</strong> isolated it by building three ways — plain <code>-g</code>, UBSan only, and ASan only. Plain and UBSan worked; <strong>only ASan hung</strong>. Running with <code>ASAN_OPTIONS=verbosity=2</code> printed two lines and stopped at <code>FindDynamicShadowStart</code> — where ASan mmaps its shadow-memory region. On macOS 26 (Darwin 25) ASan's shadow-finding probe loops forever. An <strong>ASan-runtime-vs-OS incompatibility, not a code bug</strong> (proven: the same source is clean under UBSan and <code>leaks</code>).</li>
+            <li><strong>Fix:</strong> <code>make debug</code> uses <strong>UndefinedBehaviorSanitizer</strong>, and leak checking uses Apple's native <strong><code>leaks</code></strong> via <code>make leaks</code> ("0 leaks for 0 total leaked bytes").</li>
+            <li><strong>Lesson:</strong> when testing a binary that might spin, run it under a <strong>watchdog</strong> that kills it after a few seconds — otherwise a startup hang silently piles up runaway processes.</li>
+          </ul></li>
+        <li><h4>A failed <code>execvp</code> must terminate the child, not fall through</h4><p>After <code>execvp</code> fails (e.g. command not found), the child keeps running the shell's code. If it returned to the REPL loop, you'd have <strong>two shells reading one keyboard</strong>. The fix is the <code>exit(EXIT_FAILURE)</code> immediately after <code>execvp</code> — it only ever runs in the child, and only when exec failed.</p></li>
+        <li><h4>Command-not-found message didn't name the command</h4><p>The first version printed a bare <code>mysh: No such file or directory</code>. Real shells name the offender. Fixed by printing <code>mysh: &lt;cmd&gt;: &lt;strerror(errno)&gt;</code> ourselves (plain <code>perror</code> can't insert the command name), so it reads <code>mysh: nosuchcmd: No such file or directory</code>.</p></li>
+        <li><h4><code>make</code> rebuilds by timestamp, not by flags</h4><p>Carried over from the packet-sniffer build: <code>make</code> decides what to rebuild by comparing file mtimes, <em>not</em> compiler flags. So the release and debug recipes write to <strong>separate</strong> output names (<code>mysh</code> vs <code>mysh-debug</code>) — a shared name would let a stale debug binary masquerade as the release build.</p></li>
+      </ol>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> pwd
+/Users/.../unix-shell
+<span class="p">mysh&gt;</span> echo hello world
+hello world
+<span class="p">mysh&gt;</span> ls
+Makefile  mysh  src
+<span class="p">mysh&gt;</span> nosuchcmd
+mysh: nosuchcmd: No such file or directory     <span class="c">← error handled, shell survives</span>
+<span class="p">mysh&gt;</span> exit</code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <p class="quiz-hint">Click to reveal the answer — try answering first.</p>
+      <div class="interview">
+        <details><summary>Why does a shell need both <code>fork</code> and <code>exec</code> instead of one call?</summary><div class="ans"><code>exec</code> replaces the current process image and never returns; calling it directly would replace the shell itself. Forking first means the child is replaced while the parent lives on — and the fork/exec gap is where you customize the child (redirect fds) before the new program starts.</div></details>
+        <details><summary>What does <code>fork</code> return, and how do you tell parent from child?</summary><div class="ans"><code>0</code> in the child, the child's PID in the parent, <code>-1</code> on failure.</div></details>
+        <details><summary>What's the difference between <code>execvp</code> and <code>execv</code>?</summary><div class="ans"><code>execvp</code> searches <code>$PATH</code> for the program; <code>execv</code> needs a full path. The <code>v</code> = argument vector (NULL-terminated array).</div></details>
+        <details><summary>Why call <code>waitpid</code>? What happens without it?</summary><div class="ans">It blocks the parent until the child exits; without it the prompt prints and the next line is read before the command finishes, interleaving output. It also reaps the child — skipping it leaves zombies (Stage 5's SIGCHLD handling addresses that for background jobs).</div></details>
+        <details><summary><code>waitpid</code> gives you a <code>status</code> int — is that the exit code?</summary><div class="ans">No, it's a packed status word. Use <code>WIFEXITED</code>/<code>WEXITSTATUS</code> for a normal exit and <code>WIFSIGNALED</code>/<code>WTERMSIG</code> for a signal death; the shell convention reports signal deaths as 128 + signal number.</div></details>
+        <details><summary>Why must the child <code>exit()</code> if <code>execvp</code> fails?</summary><div class="ans">Otherwise it falls back into the REPL and you get a second shell reading the same input.</div></details>
+        <details><summary>How does your parser manage memory for the tokens?</summary><div class="ans"><code>strtok</code> tokenizes the line in place and the arg pointers borrow from that buffer; no per-token allocation, but the line must stay alive and writable while the command is used.</div></details>
+        <details><summary>How does the shell know to stop (EOF)?</summary><div class="ans"><code>getline</code> returns <code>-1</code> at end-of-file (Ctrl+D on an empty line); we break the loop.</div></details>
+        <details><summary>How did you check for memory safety without AddressSanitizer?</summary><div class="ans">ASan hangs at startup on this macOS version (a known runtime/OS incompatibility), so I used UBSan plus Apple's <code>leaks</code> tool — zero leaks, warning-free build, and an allocation-light path.</div></details>
+      </div>
+    </section>
+
+    <!-- STAGE 2 -->
+    <section id="stage-2" class="stage">
+      <div class="stage-head"><span class="badge">Stage 02</span><h2>Pipes</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>parser.c</code>, <code>parser.h</code>, <code>executor.c</code>, <code>executor.h</code> (+ <code>main.c</code> wiring)</p>
+      <p class="goal"><strong>Goal:</strong> chain commands with <code>|</code> so one command's stdout becomes the next one's stdin. <code>ls -la | grep .c</code>, <code>cat /etc/passwd | grep root | wc -l</code>, and <code>echo hi | tr a-z A-Z</code> all work.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>What a pipe actually is</h4><p><code>pipe(int fds[2])</code> asks the kernel for a one-way, in-memory FIFO buffer and returns two file descriptors onto it: <code>fds[0]</code> is the <strong>read</strong> end, <code>fds[1]</code> is the <strong>write</strong> end. Bytes written to <code>fds[1]</code> come out of <code>fds[0]</code>, in order. It's the same primitive the kernel uses everywhere; a shell pipeline is just two processes sharing one.</p></li>
+        <li><h4><code>dup2(oldfd, newfd)</code> — redirecting a standard stream</h4><p>A child still runs a normal program like <code>grep</code> that reads from fd 0 (stdin) and writes to fd 1 (stdout) — it knows nothing about pipes. <code>dup2(pipefd[1], STDOUT_FILENO)</code> makes fd 1 a <em>copy</em> of the pipe's write end, so when <code>grep</code> writes to stdout it's really writing into the pipe. <code>dup2</code> atomically closes the old <code>newfd</code> first, then duplicates. This is the exact mechanism Stage 3 reuses for <code>&gt;</code> and <code>&lt;</code> — file redirection and pipes are the same idea pointed at different fds.</p></li>
+        <li><h4>The closing discipline — the #1 pipe bug</h4><p>A pipe's read end reports EOF <strong>only when every copy of the write end is closed</strong>. <code>fork</code> duplicates all open fds, so after forking the children of a pipeline, the <em>parent</em> and several children may each hold a copy of the same write end. If even one stays open, the reader downstream blocks forever waiting for an EOF that never comes — the pipeline hangs. The rule: after <code>dup2</code>, close the original; and in the parent, close every pipe end the moment it's handed off to a child. We close in both children and the parent, aggressively.</p></li>
+        <li><h4>Why all stages run concurrently (not one-then-the-next)</h4><p>A pipe's kernel buffer is small (often 64 KB). If the shell ran <code>producer</code> fully, then <code>consumer</code>, a producer emitting more than the buffer holds would block on a full pipe with nobody reading — deadlock. So every command in the pipeline is forked up front and runs at the same time; the kernel schedules them and applies back-pressure (a full pipe blocks the writer, an empty one blocks the reader) automatically.</p></li>
+        <li><h4>SIGPIPE — graceful early exit (<code>yes | head</code>)</h4><p>When a downstream command finishes early (<code>head -3</code> stops after 3 lines and closes its read end), the upstream <code>yes</code> keeps writing — into a pipe with no reader. The kernel sends it <strong>SIGPIPE</strong>, whose default action is to terminate the process. That's <em>correct</em>: <code>yes</code> dies, the pipeline ends, and the shell doesn't hang. We left the children's default SIGPIPE in place, so this just works. (The shell itself never writes to a pipe, so it's unaffected.)</p></li>
+        <li><h4>Pipeline exit status = the last command</h4><p><code>execute_pipeline</code> reaps all children but reports only the <strong>last</strong> command's status as <code>$?</code> — bash's convention. So <code>false | true</code> is success and <code>true | false</code> is failure. The other children are still <code>waitpid</code>'d so they don't become zombies.</p></li>
+        <li><h4><code>strtok_r</code> for two-level parsing</h4><p>Parsing is now two passes: split on <code>|</code>, then split each segment on whitespace. Plain <code>strtok</code> keeps its progress in one hidden global, so a tokenization nested inside another would corrupt it. <code>strtok_r</code> stores that state in a caller-owned <code>saveptr</code>, giving the outer (pipe) and inner (argument) passes independent bookmarks. A pipeline of length 1 falls out for free — no <code>|</code>, one segment, one command — so the executor needs only a single entry point.</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <p class="lead-note">This stage compiled clean on the first try and ran leak-free — <em>because</em> the two classic traps were designed around up front. Worth recording the traps and the decisions that avoid them, since both are prime interview territory:</p>
+      <ol class="bugs">
+        <li><h4>The pipe-hang trap (avoided by closing discipline)</h4><p>The failure mode — a pipeline that hangs forever — comes from a single leaked write-end fd keeping EOF from firing. The defense is mechanical: every <code>dup2</code> is immediately followed by closing the original, and the parent closes each pipe end the instant it's handed to a child. The <code>yes | head -3</code> test exists specifically to catch a regression: if any fd leaked, that command would hang instead of printing 3 lines and stopping.</p></li>
+        <li><h4>The <code>strtok</code> re-entrancy trap (avoided by <code>strtok_r</code>)</h4><p>The intuitive two-level parse — outer <code>strtok</code> on <code>|</code>, calling a helper that also uses <code>strtok</code> on whitespace — silently breaks, because the inner loop overwrites the outer loop's hidden global cursor. Symptom: commands after the first <code>|</code> getting mangled or dropped. Switching both passes to <code>strtok_r</code> (each with its own <code>saveptr</code>) removes the shared state entirely.</p></li>
+        <li><h4>Known limitation, accepted for now: malformed pipes</h4><p>Because the <code>|</code> split uses <code>strtok_r</code> (which collapses consecutive delimiters and ignores leading/trailing ones), inputs like <code>ls | | grep</code> or <code>ls |</code> are handled <em>leniently</em> — the empty segment is skipped rather than reported as <code>syntax error near unexpected token '|'</code> the way bash does. Proper detection needs a hand-rolled scan that preserves empty fields. A candidate for the Stage 7 polish pass.</p></li>
+      </ol>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> ls src | grep .c
+executor.c
+main.c
+parser.c
+<span class="p">mysh&gt;</span> cat /etc/passwd | grep root | wc -l    <span class="c">← three-stage pipeline</span>
+       3
+<span class="p">mysh&gt;</span> echo hello world | tr a-z A-Z
+HELLO WORLD
+<span class="p">mysh&gt;</span> yes | head -3                          <span class="c">← must NOT hang</span>
+y
+y
+y
+<span class="p">mysh&gt;</span></code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <div class="interview">
+        <details><summary>What does <code>pipe()</code> give you, and which end is which?</summary><div class="ans">Two fds onto one kernel buffer: <code>fds[0]</code> read, <code>fds[1]</code> write; bytes written to the write end come out the read end.</div></details>
+        <details><summary>How do you connect one command's output to another's input?</summary><div class="ans"><code>dup2</code> the pipe's write end onto the producer's stdout and the read end onto the consumer's stdin, so the unchanged programs read/write the pipe via fd 0/1.</div></details>
+        <details><summary>What's the most common bug with pipes, and how do you prevent it?</summary><div class="ans">Leaking a pipe fd: the read end never sees EOF until all write-end copies are closed, so the pipeline hangs. Close every end you don't use, in both children and parent, right after <code>dup2</code>.</div></details>
+        <details><summary>Why must the parent close its copies of the pipe fds too?</summary><div class="ans"><code>fork</code> duplicated them; if the parent keeps a write end open, the reader's EOF never fires even though the producing child finished.</div></details>
+        <details><summary>Why run all commands at once instead of sequentially?</summary><div class="ans">The pipe buffer is finite; a producer that outruns it blocks until a concurrent consumer drains it. Running them serially would deadlock on the full buffer.</div></details>
+        <details><summary>What happens in <code>yes | head</code>? Why doesn't it hang?</summary><div class="ans"><code>head</code> exits and closes the read end; <code>yes</code> then writes to a reader-less pipe, gets SIGPIPE, and is terminated by the default handler. The pipeline ends cleanly.</div></details>
+        <details><summary>What exit status does a pipeline return?</summary><div class="ans">The last command's (bash convention); the rest are still reaped to avoid zombies.</div></details>
+        <details><summary>Why <code>strtok_r</code> instead of <code>strtok</code> here?</summary><div class="ans">The parse is nested (split on <code>|</code>, then on whitespace); <code>strtok</code>'s single hidden cursor can't support two simultaneous tokenizations, but <code>strtok_r</code>'s per-call <code>saveptr</code> can.</div></details>
+      </div>
+    </section>
+
+    <!-- STAGE 3 -->
+    <section id="stage-3" class="stage">
+      <div class="stage-head"><span class="badge">Stage 03</span><h2>I/O Redirection</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>parser.c</code>, <code>parser.h</code>, <code>executor.c</code> (+ <code>main.c</code> wiring)</p>
+      <p class="goal"><strong>Goal:</strong> send a command's output to a file (<code>&gt;</code>), append to it (<code>&gt;&gt;</code>), or feed its input from a file (<code>&lt;</code>) — and have these compose with pipes.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>Redirection is the <em>same</em> <code>dup2</code> trick as pipes, aimed at a file</h4><p>Stage 2 pointed a child's stdout at a pipe's write end. Redirection points it at an <strong>open file descriptor</strong> instead. <code>open()</code> returns an fd for the file; <code>dup2(fd, STDOUT_FILENO)</code> makes fd 1 a copy of it, so the unchanged program writes to "stdout" and the bytes land in the file. Input is the mirror image: <code>dup2(fd, STDIN_FILENO)</code>. Pipes and files are interchangeable behind a file descriptor — that uniformity ("everything is a file descriptor") is one of Unix's core design ideas, and this stage is it in miniature.</p></li>
+        <li><h4>The <code>open()</code> flags ARE the feature</h4>
+          <p>The only difference between overwrite and append is the flag set:</p>
+          <ul class="sub">
+            <li><code>&gt;</code> → <code>O_WRONLY | O_CREAT | O_TRUNC</code> — create if absent, else truncate to 0.</li>
+            <li><code>&gt;&gt;</code> → <code>O_WRONLY | O_CREAT | O_APPEND</code> — create if absent, else each write seeks to end first (atomically, even with concurrent writers).</li>
+            <li><code>&lt;</code> → <code>O_RDONLY</code> — open existing file for reading; no create.</li>
+          </ul>
+          <p>The third argument to <code>open</code> (<code>0644</code>) is the permission mode for a newly created file, modified by the process umask. It's ignored when no file is created.</p></li>
+        <li><h4>Where redirection is applied — child only, and <em>after</em> pipe wiring</h4><p><code>apply_redirection</code> runs inside the child, at the top of <code>exec_child</code>, which is <em>after</em> the pipeline code has dup2'd any pipe ends onto stdin/stdout. So an explicit file redirection <strong>overrides</strong> the pipe default. That's the correct precedence: in <code>a | b &gt; out</code>, <code>b</code>'s stdout must go to the file, not onward; in <code>sort &lt; in | head</code>, <code>sort</code>'s stdin comes from the file while its stdout still feeds the pipe. Putting redirection in the shared <code>exec_child</code> means both the single-command and pipeline paths get it for free.</p></li>
+        <li><h4>Close the fd after <code>dup2</code></h4><p>Once <code>dup2(fd, STDOUT_FILENO)</code> has copied the file onto fd 1, the original <code>fd</code> number is redundant — we <code>close(fd)</code> immediately. Same discipline as pipes. (Leaving a file fd open is less catastrophic than a pipe fd — it won't hang anything — but it's a descriptor leak, and on a long-running shell descriptors are finite.)</p></li>
+        <li><h4>Parsing: operators are tokens, not arguments</h4><p>The parser recognizes <code>&lt;</code>, <code>&gt;</code>, <code>&gt;&gt;</code> as their own tokens, takes the <strong>next</strong> token as the filename, and stores them in <code>command_t.input_file</code> / <code>output_file</code> / <code>append_mode</code> — adding <em>none</em> of them to <code>args</code>. The program never sees the operator or filename; it just finds its standard streams redirected. That's exactly how a real shell works: <code>wc -l &lt; file</code> runs <code>wc</code> with argv <code>["wc","-l"]</code> and stdin attached to the file, which is why it prints just a number with no filename (unlike <code>wc -l file</code>).</p></li>
+        <li><h4>Syntax errors and a new <code>-1</code> return contract</h4><p>A dangling operator like <code>ls &gt;</code> has no filename. <code>parse_command</code> now returns <code>-1</code> (distinct from <code>0</code> = blank line) after printing <code>mysh: syntax error: expected filename after '&gt;'</code>; <code>parse_pipeline</code> propagates it, and <code>main</code> treats <code>&lt;= 0</code> as "nothing to run." A bad filename at runtime (e.g. <code>&lt; nonexistent</code>) is caught by <code>open</code> in the child, which reports and exits with failure — the shell itself is untouched.</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <p class="lead-note">Like Stage 2, this compiled clean and ran leak-free on the first build — because the one genuine design subtlety was handled deliberately.</p>
+      <ol class="bugs">
+        <li><h4>The precedence ordering (the real design decision)</h4><p>The trap: if file redirection were applied <em>before</em> the pipe <code>dup2</code>s (or in the pipeline code instead of <code>exec_child</code>), then <code>a | b &gt; out</code> would let the pipe clobber the file redirection and <code>b</code>'s output would go to the wrong place. Decision: apply redirection <strong>after</strong> all pipe wiring, inside <code>exec_child</code>, so the explicit file always wins. Verified live with both <code>ls src | grep .c &gt; file</code> (redirect on the last stage) and <code>sort &lt; file | head -1</code> (redirect on the first stage).</p></li>
+        <li><h4>Distinguishing "blank line" from "syntax error"</h4><p>Before Stage 3, <code>parse_*</code> returned <code>0</code> for "nothing." Redirection needs a third outcome — a real error the user should see. Rather than overload <code>0</code>, the contract grew a <code>-1</code> case, and <code>main</code>'s check changed from <code>== 0</code> to <code>&lt;= 0</code>. Small, but it keeps "empty input" (silent re-prompt) and "you typed something invalid" (printed error) cleanly separate.</p></li>
+        <li><h4>Known limitations, accepted for now</h4>
+          <ul class="sub">
+            <li><strong>Attached operators</strong> aren't supported: you must write <code>ls &gt; out.txt</code>, not <code>ls &gt;out.txt</code>. The token-based parser treats <code>&gt;out.txt</code> as one token. Bash splits it; we don't (yet).</li>
+            <li><strong>Redirection with no command</strong> (<code>&gt; file</code> alone, which bash uses to truncate a file) is a no-op here — a zero-arg segment is skipped before any file is touched.</li>
+          </ul>
+          <p>Both are candidates for the Stage 7 polish pass and are documented in <code>parser.h</code>.</p></li>
+      </ol>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> echo first line  &gt; /tmp/t.txt
+<span class="p">mysh&gt;</span> echo second line &gt;&gt; /tmp/t.txt     <span class="c">← append, doesn't clobber</span>
+<span class="p">mysh&gt;</span> cat /tmp/t.txt
+first line
+second line
+<span class="p">mysh&gt;</span> grep second &lt; /tmp/t.txt           <span class="c">← stdin from file</span>
+second line
+<span class="p">mysh&gt;</span> wc -l &lt; /tmp/t.txt                  <span class="c">← just a number (no filename arg)</span>
+       2
+<span class="p">mysh&gt;</span> ls src | grep .c &gt; /tmp/c.txt       <span class="c">← pipe AND redirect together</span>
+<span class="p">mysh&gt;</span> cat &lt; /tmp/nonexistent
+mysh: /tmp/nonexistent: No such file or directory
+<span class="p">mysh&gt;</span> ls &gt;
+mysh: syntax error: expected filename after '&gt;'</code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <div class="interview">
+        <details><summary>How does output redirection actually work?</summary><div class="ans"><code>open</code> the file, <code>dup2</code> its fd onto STDOUT_FILENO so the program's stdout writes go to the file, then close the original fd.</div></details>
+        <details><summary>What's the difference between <code>&gt;</code> and <code>&gt;&gt;</code> at the syscall level?</summary><div class="ans">The open flags: <code>O_TRUNC</code> empties the file first; <code>O_APPEND</code> makes every write go to the current end. Everything else is identical.</div></details>
+        <details><summary>Why is <code>wc -l &lt; file</code> different from <code>wc -l file</code>?</summary><div class="ans">With <code>&lt;</code>, the shell attaches the file to <code>wc</code>'s stdin and <code>wc</code> sees no filename argument (so it prints only the count); with <code>file</code>, <code>wc</code> opens it itself and prints the name too.</div></details>
+        <details><summary>How do redirection and pipes interact in <code>a | b &gt; out</code>?</summary><div class="ans">Both use <code>dup2</code>; redirection is applied after the pipe wiring so the file wins — <code>b</code>'s output goes to <code>out</code>, not to a downstream pipe.</div></details>
+        <details><summary>Where do you apply the redirection — parent or child?</summary><div class="ans">The child, after fork and after any pipe setup, before exec; it must not affect the shell's own fds.</div></details>
+        <details><summary>What's the third argument to <code>open</code> and when does it matter?</summary><div class="ans">The permission mode for a newly created file (e.g. 0644), masked by umask; ignored if the file already exists or isn't being created.</div></details>
+        <details><summary>How do you handle a redirection to a file you can't open?</summary><div class="ans"><code>open</code> fails in the child; report via <code>strerror(errno)</code> and exit the child with failure, leaving the shell running.</div></details>
+      </div>
+    </section>
+
+    <!-- STAGE 4 -->
+    <section id="stage-4" class="stage">
+      <div class="stage-head"><span class="badge">Stage 04</span><h2>Built-in Commands</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>builtins.c</code>, <code>builtins.h</code>, <code>history.c</code>, <code>history.h</code>, <code>shell.h</code> (+ <code>executor.{c,h}</code> and <code>main.c</code> wiring)</p>
+      <p class="goal"><strong>Goal:</strong> implement <code>cd</code>, <code>exit</code>, <code>export</code>, <code>history</code>, and <code>help</code> as commands the shell runs <em>itself</em>, not as forked child processes.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>Why built-ins can't be forked (the whole point of the stage)</h4><p>A child process is a <em>copy</em> of the shell with its own address space and kernel state. If <code>cd</code> ran in a forked child, the child's <code>chdir()</code> would change <em>that child's</em> working directory and then the child would exit — the shell's directory is untouched. Same logic for <code>export</code> (must edit the shell's own environment so future children inherit it), <code>exit</code> (must end the shell, not a child), and <code>history</code> (must read the shell's own list). So these run <em>in the shell process</em>: <code>main</code> checks <code>is_builtin()</code> and calls <code>run_builtin()</code> directly, with no fork in between.</p></li>
+        <li><h4>Detection happens before the fork</h4><p>The dispatch order is: parse → is it a single command that's a built-in? → if so, run in-process; otherwise fork/exec. Getting this order right is what makes <code>cd</code> work at all — fork first and you've already lost.</p></li>
+        <li><h4>Built-ins inside a pipeline run in a subshell (the subtle, correct bit)</h4><p><code>history | grep cd</code> should work — <code>history</code> produces output that flows into <code>grep</code>. But that <code>history</code> (and any built-in in a pipeline) runs in the <em>forked child</em>, because a pipeline stage needs its own stdout wired to the pipe. A consequence, exactly bash's behavior: <code>cd /tmp | wc</code> does <strong>not</strong> change your shell's directory, because the <code>cd</code> ran in a child that immediately exited. <code>exec_child</code> (only ever called in a child) checks <code>is_builtin</code> and runs the built-in there; the single-command path in <code>main</code> is the only one that runs a built-in in the shell process. Verified live — <code>cd /tmp | wc -c</code> followed by <code>pwd</code> still shows the original directory.</p></li>
+        <li><h4><code>cd</code> and <code>export</code> are thin wrappers over libc/syscalls</h4><p><code>cd</code> is <code>chdir(dir)</code> with a default of <code>getenv("HOME")</code>. <code>export NAME=VALUE</code> splits on <code>=</code> and calls <code>setenv(name, value, 1)</code> (the <code>1</code> = overwrite). Because <code>setenv</code> edits the shell's environment, every later child inherits it across fork/exec — provable with <code>printenv MYVAR</code> (which reads the environment directly).</p></li>
+        <li><h4>Note: <code>$VAR</code> expansion is NOT this stage</h4><p><code>export MYVAR=hello</code> then <code>echo $MYVAR</code> prints the literal <code>$MYVAR</code>, because variable <em>expansion</em> is a separate parsing feature (a Stage 7 stretch goal). The export still works — the parser just doesn't yet substitute <code>$VAR</code> before running a command. The honest way to demonstrate <code>export</code> is <code>printenv MYVAR</code> or <code>env | grep MYVAR</code>.</p></li>
+        <li><h4>History as a ring buffer</h4><p><code>history.c</code> keeps the last <code>HISTORY_CAPACITY</code> (1000) commands in a fixed array used circularly: <code>next</code> is the write cursor, and once full it overwrites the oldest slot with no shifting (O(1) insert). A separate <code>total</code> counter numbers the displayed lines like bash, so the numbers keep climbing even after old commands age out. Each line is <code>strdup</code>'d on entry and freed at shutdown — which is why the leak check still reports zero.</p></li>
+        <li><h4><code>exit</code> sets a flag instead of calling <code>exit()</code></h4><p>The obvious <code>builtin_exit</code> would just call libc <code>exit()</code>. But that would jump over the REPL's cleanup (<code>free(line)</code>, <code>history_free</code>), and under <code>leaks</code> those un-freed allocations would show up as leaks. Instead <code>builtin_exit</code> sets <code>state-&gt;should_exit</code>; <code>main</code> sees it, breaks the loop, frees everything, and returns the code. Clean teardown, clean leak report.</p></li>
+        <li><h4>One state struct, threaded explicitly (no globals)</h4><p><code>shell_state_t</code> (history + last status + the exit flag) is passed by pointer into the executor rather than living in globals. It's easier to reason about and test, and it's the same context-threading discipline used in the packet-sniffer (which passed a context via libpcap's user pointer). Stage 5's jobs table joins this struct.</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <ol class="bugs">
+        <li><h4><code>const</code>-qualifier warning — a real fix this stage</h4><p>First build threw two <code>-Wincompatible-pointer-types-discards-qualifiers</code> warnings: <code>run_builtin</code> takes <code>const command_t *cmd</code>, so <code>cmd-&gt;args</code> has type <code>char *const *</code> (the pointers are const), but <code>builtin_cd</code>/<code>builtin_export</code> were declared <code>char **args</code>. Passing the const-pointer array to a non-const parameter discards the qualifier. Two valid fixes existed — drop the <code>const</code> on <code>cmd</code>, or make the helpers const-correct. I chose the latter: <code>char *const *args</code>. The helpers only <em>read</em> the <code>args</code> array (and <code>export</code> mutates the <em>string contents</em> via its own <code>char *</code>, which <code>char *const *</code> still permits), so const-correctness cost nothing and kept <code>const command_t</code> intact. Zero warnings is a hard rule, so this had to be fixed, not suppressed.</p></li>
+        <li><h4>The leak trap in <code>exit</code> (avoided by design)</h4><p>Calling <code>exit()</code> from the built-in would have left <code>line</code> and the history buffer un-freed at the moment the process died, and <code>make leaks</code> would report them. The flag-and-unwind approach keeps the teardown path intact. This is the kind of thing that only shows up <em>because</em> we run a leak checker every stage.</p></li>
+        <li><h4>Known limitation: redirection on a single built-in</h4><p><code>history &gt; out.txt</code> typed as a standalone command does <strong>not</strong> redirect — the single-built-in path in <code>main</code> runs in the shell process and skips <code>apply_redirection</code> (only the fork/exec path applies it). Inside a pipeline it <em>would</em> redirect (it goes through <code>exec_child</code>). A Stage 7 polish candidate (save/restore the shell's fds around an in-process built-in).</p></li>
+      </ol>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> pwd
+/Users/.../unix-shell
+<span class="p">mysh&gt;</span> cd /tmp
+<span class="p">mysh&gt;</span> pwd
+/private/tmp                 <span class="c">← cd changed the SHELL's directory</span>
+<span class="p">mysh&gt;</span> cd /tmp | wc -c
+       0
+<span class="p">mysh&gt;</span> pwd
+/Users/.../unix-shell        <span class="c">← cd in a pipeline did NOT (subshell)</span>
+<span class="p">mysh&gt;</span> export MYVAR=hello
+<span class="p">mysh&gt;</span> printenv MYVAR
+hello                        <span class="c">← child inherited the exported var</span>
+<span class="p">mysh&gt;</span> history | grep cd
+    2  cd /tmp
+<span class="p">mysh&gt;</span> exit 7                 <span class="c">← shell exits with status 7</span></code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <div class="interview">
+        <details><summary>Why can't <code>cd</code> be implemented as an external program / forked child?</summary><div class="ans">It would <code>chdir</code> in the child, which then exits; the parent shell's working directory is unaffected. It must run in the shell process.</div></details>
+        <details><summary>Which commands must be built-ins and why?</summary><div class="ans"><code>cd</code> (cwd), <code>exit</code> (terminate the shell), <code>export</code>/<code>unset</code> (shell environment), <code>history</code> (shell's own state) — anything that mutates the shell itself rather than doing work in a child.</div></details>
+        <details><summary>What happens to <code>cd</code> in a pipeline like <code>cd /x | cmd</code>?</summary><div class="ans">It runs in a subshell (forked child), so it has no effect on the parent shell — exactly bash's behavior.</div></details>
+        <details><summary>How does <code>export</code> make a variable visible to programs you run?</summary><div class="ans"><code>setenv</code> on the shell's environment; <code>fork</code> copies the environment and <code>exec*</code> passes it to the new program.</div></details>
+        <details><summary>Why doesn't <code>echo $VAR</code> print the value yet?</summary><div class="ans">Variable expansion is a separate parsing step we haven't added; <code>export</code> sets the env, but the parser doesn't substitute <code>$VAR</code> into argv. <code>printenv VAR</code> proves the env is set.</div></details>
+        <details><summary>How is command history stored?</summary><div class="ans">A fixed-size ring buffer (O(1) insert, overwrites oldest when full) with a running total for bash-style numbering; entries are heap copies freed at exit.</div></details>
+        <details><summary>Why set a flag for <code>exit</code> instead of calling exit()?</summary><div class="ans">To unwind through the REPL and free resources, so shutdown is clean (and the leak checker stays at zero).</div></details>
+        <details><summary>How did you avoid global state for the shell's data?</summary><div class="ans">A single <code>shell_state_t</code> passed by pointer into the executor.</div></details>
+      </div>
+    </section>
+
+    <!-- STAGE 5 -->
+    <section id="stage-5" class="stage">
+      <div class="stage-head"><span class="badge">Stage 05</span><h2>Background Processes</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>jobs.c</code>, <code>jobs.h</code>, <code>signals.c</code>, <code>signals.h</code> (+ <code>parser</code>, <code>executor</code>, <code>builtins</code>, <code>shell.h</code>, <code>main.c</code> wiring)</p>
+      <p class="goal"><strong>Goal:</strong> run a command with a trailing <code>&amp;</code> in the background — return to the prompt immediately — and manage it with <code>jobs</code>, <code>fg</code>, and <code>kill</code>, reaping it when it finishes so it never becomes a zombie.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>Background = fork without wait + track the job</h4><p>A foreground command is fork → waitpid. A background command is fork → <em>don't</em> waitpid → record the child in a jobs table → return to the prompt. The single fork engine <code>spawn_pipeline</code> is shared; the only difference is what happens after: foreground waits, background records.</p></li>
+        <li><h4>Zombies, and why reaping is mandatory</h4><p>When a child exits, the kernel keeps a small "zombie" entry holding its exit status until the parent collects it with <code>wait</code>/<code>waitpid</code>. A foreground command is collected right away. A background child finishes whenever it likes, so something must collect it later — otherwise zombies accumulate. That "something" is the SIGCHLD handler.</p></li>
+        <li><h4>SIGCHLD + <code>waitpid(-1, WNOHANG)</code> in a loop</h4><p>When any child terminates the kernel sends the parent SIGCHLD. The handler reaps with <code>waitpid(-1, &amp;status, WNOHANG)</code>: <code>-1</code> = any child, <code>WNOHANG</code> = don't block if none are ready. It loops because <strong>signals don't queue</strong> — if three children die at nearly the same time, the parent may get a single SIGCHLD standing for all three, so one delivery must drain every finished child.</p></li>
+        <li><h4>Async-signal-safety: the handler does almost nothing</h4><p>A signal handler can interrupt the program anywhere, even mid-<code>printf</code>/<code>malloc</code>, so it may only call <strong>async-signal-safe</strong> functions. <code>waitpid</code> is safe; <code>printf</code> and <code>malloc</code> are not. So the handler only reaps and flips a job's state to DONE (<code>jobs_mark_done</code> touches the array and nothing else). It prints nothing. The "[1] Done" notice is emitted later, from normal code at the next prompt (<code>jobs_notify_completed</code>). It also saves/restores <code>errno</code>, because it may have interrupted code that was about to read it.</p></li>
+        <li><h4>The two races, and <code>sigprocmask</code></h4>
+          <p>The handler and the main code share the jobs table, a classic concurrency hazard. Two specific races, both fixed by <strong>blocking SIGCHLD</strong> (<code>sigprocmask</code>) around the critical section:</p>
+          <ul class="sub">
+            <li><strong>Reaper steals a foreground child.</strong> If SIGCHLD fired while a foreground command was running, the handler's <code>waitpid(-1)</code> would reap that foreground child, and the shell's own <code>waitpid(pid)</code> would then fail with ECHILD and lose the status. Fix: block SIGCHLD around the foreground spawn+wait.</li>
+            <li><strong>Mark-done before add.</strong> A very short background job could finish (and the handler run) <em>before</em> <code>jobs_add</code> recorded it, so <code>mark_done</code> would find nothing and the job would be stuck "Running" forever. Fix: block SIGCHLD around the background spawn+add.</li>
+          </ul></li>
+        <li><h4><code>SA_RESTART</code> so the prompt survives a finishing job</h4><p>The shell spends most of its life blocked in the read under <code>getline</code>. If a background job finishes then, SIGCHLD interrupts that read. Without care the read returns -1/EINTR — which our code reads as EOF and would exit the shell! The handler is installed with <code>sigaction</code> and <strong><code>SA_RESTART</code></strong>, which auto-restarts the interrupted read instead of failing it. (<code>SA_NOCLDSTOP</code> is also set so we aren't notified about merely <em>stopped</em> children — that's Stage 6's concern.)</p></li>
+        <li><h4>Children must start with a clean signal mask</h4><p>Because the shell forks with SIGCHLD blocked (inside the critical sections), the child inherits that blocked mask — and <code>exec</code> preserves the mask. A new program shouldn't start with SIGCHLD blocked, so <code>exec_child</code> resets the mask to empty before exec.</p></li>
+        <li><h4>Why the handler can't be passed the jobs table</h4><p>A signal handler's signature is fixed — it receives only the signal number. So the table is reached through a file-static pointer set at install time. This is the one place the shell uses a global, forced by the signal API (noted honestly rather than pretending the no-globals rule held everywhere).</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <p class="lead-note">This stage built clean and ran leak-/zombie-free on the first try — but only because the concurrency hazards were designed around deliberately. They're the whole point of the stage, so here they are as "traps and the decisions that avoid them":</p>
+      <ol class="bugs">
+        <li><h4>The ECHILD race (reaper vs. foreground wait)</h4><p>The symptom if unguarded: intermittent "waitpid: No such child" and lost/garbled exit statuses, depending on timing — the nastiest kind of bug. The fix is to block SIGCHLD around every foreground wait. <em>Tested:</em> foreground commands still report correct status while a background job runs.</p></li>
+        <li><h4>The lost-job race (mark-done before add)</h4><p>Block SIGCHLD around spawn+<code>jobs_add</code>. <em>Tested:</em> very fast jobs still show up and get their Done notice.</p></li>
+        <li><h4>EINTR exiting the shell</h4><p>Before <code>SA_RESTART</code>, a background job finishing while the user sat at the prompt would interrupt <code>getline</code>, return EOF, and quit the shell unexpectedly. <code>SA_RESTART</code> fixes it. <em>Tested:</em> <code>sleep 1 &amp;</code> then waiting does not drop the shell.</p></li>
+        <li><h4>Inherited blocked mask in children</h4><p>Fixed by resetting the mask in <code>exec_child</code>. Without it, every program you run would start with SIGCHLD blocked — invisible until you ran something that itself relied on SIGCHLD.</p></li>
+        <li><h4>Known limitations, accepted for now</h4>
+          <ul class="sub">
+            <li>A killed job is reported as <code>Done</code>, not <code>Terminated</code> (we don't yet decode <em>how</em> it died for the notice).</li>
+            <li>A background <em>pipeline</em> tracks only one stage as the job's pid; all stages are still reaped (no zombies), but the recorded status reflects that stage.</li>
+            <li><code>&amp;</code> must be its own token (<code>sleep 5 &amp;</code>, not <code>sleep 5&amp;</code>) — same tokenizer simplification as the redirection operators.</li>
+          </ul>
+          <p>Stage 6 (process groups / real job control) and the Stage 7 polish revisit these.</p></li>
+      </ol>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> sleep 1 &amp;
+[1] 26672                     <span class="c">← job id and pid; prompt returns immediately</span>
+<span class="p">mysh&gt;</span> jobs
+[1]  Running  sleep 1
+<span class="p">mysh&gt;</span> sleep 2                 <span class="c">← foreground; the bg job finishes meanwhile</span>
+<span class="p">mysh&gt;</span> [1]  Done     sleep 1   <span class="c">← reported at the next prompt, not mid-output</span>
+<span class="p">mysh&gt;</span> sleep 2 &amp;
+[1] 26848
+<span class="p">mysh&gt;</span> fg %1                   <span class="c">← wait for it in the foreground</span>
+sleep 2</code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <div class="interview">
+        <details><summary>What's a zombie process and how do you avoid one?</summary><div class="ans">A terminated child whose exit status hasn't been collected; the parent must <code>wait</code>/<code>waitpid</code> it. We reap background children in a SIGCHLD handler.</div></details>
+        <details><summary>Why loop <code>waitpid(-1, WNOHANG)</code> in the SIGCHLD handler?</summary><div class="ans">Signals don't queue, so one SIGCHLD may represent several dead children; the loop drains them all, and WNOHANG keeps it from blocking when none remain.</div></details>
+        <details><summary>What can you safely call in a signal handler, and why?</summary><div class="ans">Only async-signal-safe functions; the handler can interrupt the program mid-<code>malloc</code> or mid-<code>printf</code>, so calling those risks deadlock/corruption. Ours only reaps and sets state, and saves/restores errno.</div></details>
+        <details><summary>How do you prevent the SIGCHLD handler from interfering with a foreground <code>waitpid</code>?</summary><div class="ans">Block SIGCHLD with <code>sigprocmask</code> around the foreground wait so the reaper can't collect that child first (which would cause ECHILD).</div></details>
+        <details><summary>What race exists between launching a background job and the reaper?</summary><div class="ans">The job could finish before it's recorded; block SIGCHLD around the fork+add so mark-done can't run before the entry exists.</div></details>
+        <details><summary>Why <code>SA_RESTART</code>?</summary><div class="ans">So a delivered SIGCHLD restarts the interrupted <code>read</code> under <code>getline</code> instead of failing it with EINTR (which we'd misread as EOF).</div></details>
+        <details><summary>Why print the "Done" notice at the prompt instead of in the handler?</summary><div class="ans">stdio isn't async-signal-safe; we defer all output to normal code.</div></details>
+        <details><summary>How does <code>fg</code> work here (before process groups)?</summary><div class="ans">A blocking <code>waitpid</code> on the job's pid (with SIGCHLD blocked so the reaper doesn't beat us to it); Stage 6 adds terminal control and stopped-job resumption.</div></details>
+      </div>
+    </section>
+
+    <!-- STAGE 6 -->
+    <section id="stage-6" class="stage">
+      <div class="stage-head"><span class="badge">Stage 06</span><h2>Signal Handling &amp; Job Control</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>signals.c</code>, <code>signals.h</code>, <code>executor.c</code>, <code>builtins.c</code>, <code>jobs.c/.h</code>, <code>shell.h</code> (+ <code>main.c</code>)</p>
+      <p class="goal"><strong>Goal:</strong> make <strong>Ctrl+C</strong> and <strong>Ctrl+Z</strong> act on the foreground job, not the shell, and let <code>fg</code>/<code>bg</code> resume a stopped job. This is real Unix job control: process groups + terminal ownership.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>The problem: terminal signals go to a whole process group</h4><p>Pressing Ctrl+C makes the terminal driver send SIGINT to <em>every</em> process in the terminal's <strong>foreground process group</strong>. If the shell and the command it ran are in the same group, Ctrl+C kills them both — including the shell. Job control exists to put each job in its <strong>own</strong> process group and hand that group the terminal, so the signal hits the job alone.</p></li>
+        <li><h4>Process groups: <code>setpgid</code></h4><p>Right after forking each stage, both child and parent call <code>setpgid</code>. The first stage creates a new group whose id (pgid) is its own pid; later stages join it. Doing it in <em>both</em> processes closes a race: whichever runs first sets the group, and the other's call is a harmless no-op. Now the whole pipeline is one group, signalable as a unit with <code>kill(-pgid, sig)</code>.</p></li>
+        <li><h4>Terminal ownership: <code>tcsetpgrp</code></h4><p>Exactly one process group "owns" the terminal at a time — that's the foreground group the driver sends Ctrl+C/Ctrl+Z to. Before waiting on a foreground job the shell calls <code>tcsetpgrp(terminal, job_pgid)</code> to give it the terminal; afterward it calls <code>tcsetpgrp(terminal, shell_pgid)</code> to take it back.</p></li>
+        <li><h4>The shell ignores the interactive signals; children restore them</h4><p>The shell sets SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU to <strong>SIG_IGN</strong>. The crucial subtlety: <strong><code>exec</code> preserves an ignored disposition</strong> (it only resets <em>caught</em> signals to default). So each child must explicitly <code>signal(SIG_DFL)</code> those before <code>exec</code> — otherwise the program you launch would inherit "ignore Ctrl+C" and be unkillable. That reset is what makes Ctrl+C work at all.</p></li>
+        <li><h4>Detecting a stop: <code>waitpid(..., WUNTRACED)</code></h4><p>A normal <code>waitpid</code> only reports termination. To notice that Ctrl+Z <strong>stopped</strong> the job, the foreground wait uses <code>WUNTRACED</code>, and <code>WIFSTOPPED(status)</code> tells the stop apart from an exit. On a stop the shell records a STOPPED job (so <code>fg</code>/<code>bg</code> can resume it) and returns to the prompt. <code>SIGCONT</code> (via <code>fg</code>/<code>bg</code>) wakes it up.</p></li>
+        <li><h4>Why <code>tcsetpgrp</code> needs SIGTTOU ignored — order matters</h4><p>When the shell reclaims the terminal it is, for that instant, a <em>background</em> process touching terminal settings — which normally raises SIGTTOU and stops it. The shell must therefore set SIGTTOU to SIG_IGN <strong>before</strong> the first <code>tcsetpgrp</code>. Get the order wrong and the shell stops itself at startup.</p></li>
+        <li><h4>Interactive-only</h4><p>All of this needs a real controlling terminal. When stdin is a pipe or file (<code>isatty</code> is false), there's nothing to control, so the <code>tcsetpgrp</code> calls are skipped (gated on <code>state-&gt;interactive</code>). Process groups are still created — they just don't matter without a terminal. This is what keeps the shell working under <code>printf ... | mysh</code> for scripted use.</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <ol class="bugs">
+        <li><h4>Unused-variable warning (real fix)</h4><p>After switching the executor to track the job by its pgid (<code>pids[0]</code>) instead of the last stage, the local <code>int n = pipeline-&gt;num_commands;</code> became dead and tripped <code>-Wunused-variable</code>. Removed it. Zero-warnings rule, so it had to go.</p></li>
+        <li><h4>The SIGTTOU/<code>tcsetpgrp</code> ordering trap (designed around)</h4><p>If the SIG_IGN for SIGTTOU were set <em>after</em> the startup <code>tcsetpgrp</code>, the shell could stop itself the moment it reclaimed the terminal. The fix is ordering: ignore the interactive signals first, <em>then</em> do the process-group/terminal setup. Documented inline in <code>install_signal_handlers</code>.</p></li>
+        <li><h4>The "ignored survives exec" trap (designed around)</h4><p>The reason Ctrl+C could silently fail to reach a child: <code>exec</code> keeps SIG_IGN. <code>reset_child_signals</code> restores SIG_DFL in every child before exec. <em>Verified</em> with a real pseudo-terminal harness: Ctrl+C kills <code>sleep 30</code> and the shell lives.</p></li>
+        <li><h4>The reaper vs. stopped jobs</h4><p>The SIGCHLD reaper uses plain <code>waitpid(-1, WNOHANG)</code> (no WUNTRACED) and is installed with <code>SA_NOCLDSTOP</code>, so it never consumes <em>stop</em> events — only the foreground wait does, via WUNTRACED. Without <code>SA_NOCLDSTOP</code> the reaper and the foreground wait would fight over who sees the stop.</p></li>
+        <li><h4>The <code>^Cmysh&gt;</code> cosmetic bug (fixed)</h4><p>After Ctrl+C the terminal echoes <code>^C</code> with no newline, so the next prompt printed right after it: <code>^Cmysh&gt;</code>. Fix: <code>wait_foreground_group</code> notes when a foreground job was killed by SIGINT/SIGQUIT and prints a newline before returning, so the prompt starts on a fresh line — matching bash. Gated on <code>state-&gt;interactive</code>, so scripted output stays byte-for-byte identical (the <code>^C</code> echo only happens on a real terminal anyway).</p></li>
+        <li><h4>Verification approach</h4><p>Job control can't be exercised by piping commands in (no tty), so it was tested two ways: piped input for non-regression (pipes, redirection, builtins, background still work), and a <strong>Python PTY harness</strong> that sends real Ctrl+C (<code>\x03</code>) and Ctrl+Z (<code>\x1a</code>) and asserts the shell survives, stops, and resumes — run against both the normal and the UBSan build.</p></li>
+      </ol>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> sleep 30
+^C                          <span class="c">← kills sleep, NOT the shell</span>
+<span class="p">mysh&gt;</span> sleep 30
+^Z
+[1]  Stopped  sleep 30      <span class="c">← Ctrl+Z stopped it; recorded as a job</span>
+<span class="p">mysh&gt;</span> jobs
+[1]  Stopped  sleep 30
+<span class="p">mysh&gt;</span> fg %1                 <span class="c">← resume in foreground</span>
+sleep 30
+^C                          <span class="c">← now kills it; shell still alive</span>
+<span class="p">mysh&gt;</span> sleep 30
+^Z
+[2]  Stopped  sleep 30
+<span class="p">mysh&gt;</span> bg %2                 <span class="c">← resume in background</span>
+[2] sleep 30 &amp;
+<span class="p">mysh&gt;</span> kill %2               <span class="c">← SIGTERM to the whole group</span></code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <div class="interview">
+        <details><summary>Why does Ctrl+C normally kill your shell, and how do you stop that?</summary><div class="ans">The terminal sends SIGINT to the whole foreground process group; put each job in its own group and give that group the terminal (<code>setpgid</code> + <code>tcsetpgrp</code>) so the signal misses the shell.</div></details>
+        <details><summary>What does <code>setpgid</code> do, and why call it in both parent and child?</summary><div class="ans">It sets a process's group; calling it in both closes the fork/exec race so the group is set no matter which runs first.</div></details>
+        <details><summary>What is <code>tcsetpgrp</code> for?</summary><div class="ans">It sets which process group is the terminal's foreground group — i.e., who receives terminal-generated signals and may read the terminal.</div></details>
+        <details><summary>You set SIGINT to SIG_IGN in the shell — why do children still die on Ctrl+C?</summary><div class="ans">Because each child restores SIG_DFL before exec; if it didn't, the ignore would survive exec (exec only resets caught handlers, not ignored ones).</div></details>
+        <details><summary>How do you detect Ctrl+Z (a stop) versus an exit?</summary><div class="ans"><code>waitpid</code> with WUNTRACED, then <code>WIFSTOPPED</code>; resume later with SIGCONT.</div></details>
+        <details><summary>Why must SIGTTOU be ignored before <code>tcsetpgrp</code>?</summary><div class="ans">Reclaiming the terminal is a background-process terminal operation that would otherwise raise SIGTTOU and stop the shell.</div></details>
+        <details><summary>How does <code>kill %1</code> signal a whole pipeline?</summary><div class="ans"><code>kill(-pgid, sig)</code> — a negative pid targets the entire process group.</div></details>
+        <details><summary>How did you test this without typing into a terminal?</summary><div class="ans">A pseudo-terminal (PTY) harness that injects the raw control characters and checks behavior.</div></details>
+      </div>
+    </section>
+
+    <!-- STAGE 7 -->
+    <section id="stage-7" class="stage">
+      <div class="stage-head"><span class="badge">Stage 07</span><h2>Polish, Presentation &amp; Stretch Goals</h2></div>
+      <p class="meta"><strong>Files:</strong> <code>expand.c</code>, <code>expand.h</code>, <code>heredoc.c</code>, <code>heredoc.h</code>, <code>README.md</code>, <code>DEMO.md</code> (+ <code>parser</code>, <code>executor</code>, <code>main</code> wiring)</p>
+      <p class="goal"><strong>Goal:</strong> make the repo something a Cisco engineer wants to read (README, syscall table, recorded demo), confirm the quality bar, and add three stretch features that make the shell feel real: <strong>variable expansion</strong>, <strong>globbing</strong>, and <strong>here-documents</strong>.</p>
+
+      <div class="label">Key concepts</div>
+      <ol class="concepts">
+        <li><h4>Word expansion is a phase between parsing and execution</h4><p>A real shell doesn't hand your raw tokens to the program — it rewrites them first. <code>expand_pipeline</code> runs after parsing and before exec, doing two substitutions in the canonical order: variables first (<code>$VAR</code>, <code>${VAR}</code>, <code>$?</code>), then pathname globbing (<code>*</code>, <code>?</code>, <code>[..]</code>). That ordering is why a word built from <code>$DIR</code> and a <code>*</code> pattern expands the variable <em>then</em> globs the result.</p></li>
+        <li><h4>Variable expansion: a small scanner</h4><p><code>expand_variables</code> walks the word; on <code>$</code> it reads a name (<code>[A-Za-z_][A-Za-z0-9_]*</code> or <code>${...}</code>) and substitutes <code>getenv(name)</code>, or the last exit status for <code>$?</code>. An undefined variable becomes the empty string, like bash. This is also the honest answer to a Stage 4 loose end: <code>export</code> always worked, but <code>echo $VAR</code> only shows it now that expansion exists.</p></li>
+        <li><h4>Globbing with <code>glob(3)</code> and <code>GLOB_NOCHECK</code></h4><p>Rather than hand-rolling a matcher, <code>expand_pipeline</code> calls POSIX <code>glob()</code> on any word containing a metacharacter. <code>GLOB_NOCHECK</code> makes an unmatched pattern come back as the literal pattern — exactly bash's default (so <code>ls *.zzz</code> with no match runs <code>ls *.zzz</code> and lets <code>ls</code> report the error). One word can expand to many, so the argument list is rebuilt.</p></li>
+        <li><h4>The memory-model shift: borrowed → owned</h4><p>Through Stage 6, every <code>args[i]</code> pointed INTO the input line (no allocation). An expanded word can be longer than the original or split into several words, so that borrow no longer works. After <code>expand_pipeline</code>, every arg and redirection target is a heap-allocated string the pipeline OWNS, freed by <code>free_expansions</code> once the command has run. The REPL now does: parse → collect here-docs → expand → execute → free_expansions → close here-docs.</p></li>
+        <li><h4>Here-documents: stdin from inline text</h4><p><code>cmd &lt;&lt; WORD</code> feeds the following lines (until a line equal to <code>WORD</code>) to <code>cmd</code> as stdin. The shell reads that body from its own input right after the command line (<code>heredoc.c</code>), writes it to a temp file, <code>unlink</code>s the file immediately (so it disappears when closed) and marks it close-on-exec, then <code>apply_redirection</code> <code>dup2</code>s that fd onto stdin — the same fd-redirection mechanism as <code>&lt;</code>, just pointed at a temp file the shell filled in.</p></li>
+        <li><h4>Presentation is part of the engineering</h4><p>The README leads with what the project is and what it taught, lists features, gives a two-command build, shows usage, and — the piece interviewers actually scan — a <strong>system-call → why-it-matters table</strong>. <code>DEMO.md</code> scripts an asciinema recording (job control needs a real terminal, so it can't be auto-captured).</p></li>
+      </ol>
+
+      <div class="label bug">Bugs &amp; mistakes (and fixes)</div>
+      <ol class="bugs">
+        <li><h4><code>/*</code> inside a block comment (<code>-Wcomment</code>, fixed twice)</h4><p>A comment that wrote a <code>$DIR</code> + star-dot-c example contained the slash-star sequence, which the compiler reads as a nested comment opener and warns about. The first reword still had a slash before the star; the fix was to phrase the example without ever putting a slash immediately before a star. A reminder that the zero-warning bar includes comments.</p></li>
+        <li><h4>A here-doc fd of 0 would alias stdin</h4><p><code>command_t</code> is <code>memset</code> to zero at parse, but <code>heredoc_fd == 0</code> is a real descriptor (stdin). If left at 0, <code>apply_redirection</code> would think every command had a here-doc on fd 0. Fixed by explicitly setting <code>heredoc_fd = -1</code> after the memset in <code>parse_command</code>.</p></li>
+        <li><h4>An accidentally committed <code>out.txt</code></h4><p>A redirection test artifact got swept into an earlier <code>git add -A</code> and committed. Caught it during the Stage 7 cleanup (<code>git status</code> showed it tracked) and removed it. Lesson: glance at <code>git status</code> before <code>add -A</code>.</p></li>
+        <li><h4>Memory discipline for the new owned strings</h4><p>Introducing heap-owned args risked leaks (verified zero) or double-frees. The rule that keeps it safe: <code>free_expansions</code> runs on every path that ran <code>expand_pipeline</code> — including before <code>exit</code> breaks the loop — so nothing is leaked and nothing is freed twice.</p></li>
+        <li><h4>Double "Done" for a finished job (post-demo polish)</h4><p>A completed job was reported twice — once in the <code>jobs</code> listing and again by the next prompt's notifier. The <code>jobs</code> built-in now clears Done entries after printing them (<code>jobs_clear_done</code>), matching bash's "report on list, then forget."</p></li>
+      </ol>
+
+      <div class="label">Known limitations (documented, not hidden)</div>
+      <ul class="note-list">
+        <li>Operators must be space-separated (<code>ls &gt; out</code>, <code>sleep 5 &amp;</code>).</li>
+        <li>No quoting, so expansions aren't word-split and quotes aren't special.</li>
+        <li>Here-doc bodies are literal (no <code>$VAR</code> expansion inside them).</li>
+        <li>A killed background job prints <code>Done</code> rather than <code>Terminated</code>.</li>
+      </ul>
+
+      <div class="label">The quality bar (final pass)</div>
+      <ul class="note-list">
+        <li>Warning-free <code>-Wall -Wextra</code> build (including comments).</li>
+        <li><strong>Zero leaks</strong> via <code>make leaks</code> across pipelines, jobs, expansion, here-docs.</li>
+        <li>Clean under UndefinedBehaviorSanitizer, including the PTY job-control paths.</li>
+        <li>Every function carries a purpose comment; constants are named (<code>MAX_ARGS</code>, <code>MAX_JOBS</code>, <code>HISTORY_CAPACITY</code>, …); system calls are error-checked.</li>
+      </ul>
+
+      <div class="label">Reading the output</div>
+      <pre><span class="bar"><i></i><i></i><i></i></span><code><span class="p">mysh&gt;</span> export GREETING=hi
+<span class="p">mysh&gt;</span> echo $GREETING from $USER, exit code $?
+hi from princetaylor, exit code 0
+<span class="p">mysh&gt;</span> ls src/*.h                          <span class="c">← wildcard globbing</span>
+src/builtins.h  src/executor.h  src/expand.h  ...
+<span class="p">mysh&gt;</span> cat &lt;&lt; EOF                            <span class="c">← here-document</span>
+&gt; hello from a heredoc
+&gt; EOF
+hello from a heredoc</code></pre>
+
+      <div class="label">Likely interview questions</div>
+      <div class="interview">
+        <details><summary>When does the shell expand <code>$VAR</code> and <code>*</code> — before or after parsing?</summary><div class="ans">After tokenizing, in a dedicated expansion phase; variables first, then globbing.</div></details>
+        <details><summary>Why did <code>echo $VAR</code> not work before this stage even though <code>export</code> did?</summary><div class="ans"><code>export</code> set the environment, but without an expansion phase the parser passed <code>$VAR</code> through literally; expansion is what substitutes it.</div></details>
+        <details><summary>How do you implement wildcards?</summary><div class="ans">POSIX <code>glob()</code>; <code>GLOB_NOCHECK</code> reproduces bash's "unmatched pattern stays literal" default; one word can yield many args.</div></details>
+        <details><summary>How does a here-document get into a command's stdin?</summary><div class="ans">Read the body up to the delimiter, stash it (here, an unlinked temp file), and <code>dup2</code> its fd onto stdin — the same redirection mechanism as <code>&lt;</code>.</div></details>
+        <details><summary>What changed about memory ownership when you added expansion?</summary><div class="ans">Args stopped borrowing from the input line and became heap-allocated/owned, freed after each command, because an expanded word can grow or split.</div></details>
+        <details><summary>How do you keep <code>$?</code> accurate?</summary><div class="ans">The shell records each command's exit status in <code>shell_state</code>, and <code>$?</code> expands to it.</div></details>
+      </div>
+    </section>
+
+    <div class="callout core"><strong>All seven stages complete.</strong> This page is the full concept record; the <a href="README.md">README</a> is the front door, and <a href="DEMO.md">DEMO.md</a> scripts the recording. The shell does pipes, redirection, built-ins, background jobs, full job control, and <code>$VAR</code>/glob/here-doc expansion — warning-free, UBSan-clean, zero leaks.</div>
+
+    <footer>
+      <p>Companion to the <a href="README.md">mysh</a> shell project · plain-text version:
+        <a href="concept_walkthrough.md">concept_walkthrough.md</a> · source in <code>src/</code>.</p>
+    </footer>
+  </main>
+</div>
+
+<a href="#top" class="totop" id="toTop" aria-label="Back to top">↑</a>
+
+<script>
+  // reading progress + back-to-top
+  var bar = document.getElementById('progress');
+  var toTop = document.getElementById('toTop');
+  function onScroll(){
+    var h = document.documentElement;
+    var scrolled = h.scrollTop / (h.scrollHeight - h.clientHeight);
+    bar.style.width = (scrolled * 100) + '%';
+    toTop.classList.toggle('show', h.scrollTop > 600);
+  }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+
+  // scroll-spy: highlight the section currently in view
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+  var map = {};
+  links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var sections = links.map(function(a){ return document.getElementById(a.getAttribute('href').slice(1)); }).filter(Boolean);
+  var spy = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(e.isIntersecting){
+        links.forEach(function(l){ l.classList.remove('active'); });
+        if(map[e.target.id]) map[e.target.id].classList.add('active');
+      }
+    });
+  }, {rootMargin:'-15% 0px -75% 0px', threshold:0});
+  sections.forEach(function(s){ spy.observe(s); });
+</script>
+</body>
+</html>
